@@ -9,8 +9,7 @@ import Photos from './pages/Photos';
 import Schedules from './pages/Schedules';
 import Logs from './pages/Logs';
 import Settings from './pages/Settings';
-import FirstRunWizard from './components/FirstRunWizard';
-import { useAppStore } from './store/app-store';
+import { FIRST_RUN_COMPLETED_SETTING, useAppStore } from './store/app-store';
 import apiClient from './lib/api-client';
 
 const router = createBrowserRouter([
@@ -31,7 +30,7 @@ const router = createBrowserRouter([
 ]);
 
 function App() {
-  const { setIsFirstRun, wizardCompleted, theme, setTheme } = useAppStore();
+  const { setIsFirstRun, theme, setTheme } = useAppStore();
 
   // Apply theme on initial load
   useEffect(() => {
@@ -52,8 +51,10 @@ function App() {
     // Check if this is first run by trying to load config
     const checkFirstRun = async () => {
       try {
-        // If wizard was already completed, we're not in first run
-        if (wizardCompleted) {
+        // The backend records a completed wizard, not this browser: a fresh or
+        // wiped backend must show the wizard even to a browser that saw it before.
+        const completed = await apiClient.getSetting(FIRST_RUN_COMPLETED_SETTING).catch(() => null);
+        if (completed === 'true') {
           console.log('Wizard already completed, skipping first run');
           setIsFirstRun(false);
           return;
@@ -67,10 +68,15 @@ function App() {
         const isConfigured =
           (config.notes_enabled && config.notes_remote_folder) ||
           (config.reminders_enabled && config.reminders_caldav_url && config.reminders_caldav_username) ||
-          (config.passwords_enabled && config.passwords_vaultwarden_url && config.passwords_vaultwarden_email);
+          (config.passwords_enabled && config.passwords_vaultwarden_url && config.passwords_vaultwarden_email) ||
+          config.photos_enabled;
 
         if (isConfigured) {
+          // Installs that finished the wizard before the backend recorded it
           console.log('Found configured services, marking wizard as complete');
+          await apiClient
+            .updateSettings([{ key: FIRST_RUN_COMPLETED_SETTING, value: 'true' }])
+            .catch((err) => console.warn('Failed to record wizard completion:', err));
           setIsFirstRun(false);
         } else {
           console.log('No services configured, showing first run wizard');
@@ -84,14 +90,11 @@ function App() {
     };
 
     checkFirstRun();
-  }, [setIsFirstRun, wizardCompleted]);
+  }, [setIsFirstRun]);
 
-  return (
-    <>
-      <RouterProvider router={router} />
-      <FirstRunWizard />
-    </>
-  );
+  // The first-run wizard is rendered by Layout, inside the router, so it can
+  // control which page sits behind it.
+  return <RouterProvider router={router} />;
 }
 
 export default App;

@@ -1,6 +1,7 @@
 import Foundation
 
-/// Publishes `PhotoKitExportService` to the Python backend over loopback HTTP.
+/// Publishes `PhotoKitExportService` to the Python backend over loopback HTTP,
+/// along with a way for the web UI to ask for macOS permissions.
 ///
 /// On start it writes a handshake file containing the bound port and a freshly
 /// generated bearer token. The backend reads that file to find the service; the
@@ -19,6 +20,10 @@ final class PhotoKitBridge {
     private let service = PhotoKitExportService()
     private var server: LocalHTTPServer?
     private let authQueue = DispatchQueue(label: "app.icloudbridge.photokit.auth")
+
+    /// Starts the permission prompts for a sync service ("notes", "reminders",
+    /// "photos"); returns false for an unknown one.
+    var onPermissionRequest: ((String) -> Bool)?
 
     func start() {
         let token = Self.makeToken()
@@ -87,6 +92,19 @@ final class PhotoKitBridge {
 
         case ("POST", "/export"):
             return startExport(request)
+
+        case ("POST", "/permissions/request"):
+            // Returns at once: the prompts wait for the user, and the answers
+            // reach the backend through permissions.json.
+            guard let service = request.query["service"] else {
+                return .error("Missing service", status: 400)
+            }
+            guard let onPermissionRequest else {
+                return .error("Permission requests are not available yet", status: 503)
+            }
+            return onPermissionRequest(service)
+                ? .json(["status": "requested"])
+                : .error("Unknown service", status: 404)
 
         case ("GET", "/job"):
             guard let id = request.query["id"] else {

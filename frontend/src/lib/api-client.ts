@@ -735,6 +735,14 @@ class APIClient {
     }
   }
 
+  async requestPermissions(service: 'notes' | 'reminders' | 'photos'): Promise<void> {
+    try {
+      await this.client.post('/system/permissions/request', { service });
+    } catch (error) {
+      return this.handleError(error);
+    }
+  }
+
   async getPermissions(): Promise<PermissionsResponse> {
     try {
       const { data } = await this.client.get<PermissionsResponse>('/system/permissions');

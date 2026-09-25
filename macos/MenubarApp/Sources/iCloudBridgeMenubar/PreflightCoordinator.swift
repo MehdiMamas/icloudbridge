@@ -143,7 +143,51 @@ final class PreflightCoordinator {
     }
 
     func presentPreflightWindow() {
-        showWindow(force: true)
+        showWindow(bringToFront: true)
+    }
+
+    /// Ask macOS for a sync service's missing permissions on behalf of the web
+    /// UI, which cannot show a system prompt itself. The answers arrive as
+    /// ordinary status updates, which rewrite permissions.json for the backend.
+    ///
+    /// Returns false for an unknown service.
+    func requestPermissions(for service: String) -> Bool {
+        let requirements: [Requirement]
+        switch service {
+        case "notes": requirements = [.fullDiskAccess, .notesAutomation]
+        case "reminders": requirements = [.remindersAutomation]
+        case "photos": requirements = [.photosAutomation, .photosAppAutomation]
+        default: return false
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let statuses = self.preflightManager.currentStatuses()
+            let missing = requirements.filter { requirement in
+                !(statuses.first { $0.requirement == requirement }?.state.isSatisfied ?? false)
+            }
+            self.request(missing)
+        }
+        return true
+    }
+
+    /// One prompt at a time: each waits for the answer to the one before.
+    private func request(_ requirements: [Requirement]) {
+        guard let requirement = requirements.first else { return }
+        let next: () -> Void = { [weak self] in self?.request(Array(requirements.dropFirst())) }
+        switch requirement {
+        case .fullDiskAccess:
+            // There is no prompt for it; only System Settings can grant it.
+            preflightManager.openFullDiskAccessPreferences()
+            next()
+        case .notesAutomation, .photosAppAutomation:
+            preflightManager.requestAutomation(for: requirement, completion: next)
+        case .remindersAutomation:
+            preflightManager.requestRemindersAccess(completion: next)
+        case .photosAutomation:
+            preflightManager.requestPhotosAutomation(completion: next)
+        case .homebrew, .xcodeCommandLineTools, .python, .ruby:
+            next()
+        }
     }
 
     private func handle(event: PreflightEvent) {
@@ -154,6 +198,11 @@ final class PreflightCoordinator {
             persistPermissions(statuses: statuses)
 
             let snapshot = currentSnapshot()
+            // Keep an open window current. Its rows used to be refreshed only
+            // on the way to (re)showing it, which never happens once the
+            // essentials are ready and "Don't show this next time" is on.
+            windowController?.apply(snapshot: snapshot)
+
             // Only essential requirements block the daemon
             let blockingIssue = statuses.contains { status in
                 guard status.requirement.isEssential else { return false }
@@ -166,9 +215,17 @@ final class PreflightCoordinator {
             }
 
             if blockingIssue {
-                showWindow(force: true)
+                showWindow()
                 windowController?.apply(snapshot: snapshot)
                 return
+            }
+
+            // Open setup on first launch even when nothing blocks the backend,
+            // so the optional permissions are offered here, not prompted for
+            // by the backend halfway through its first sync.
+            if !hasShownOnce {
+                showWindow()
+                windowController?.apply(snapshot: snapshot)
             }
 
             if allRequirementsSatisfied() {
@@ -271,7 +328,13 @@ final class PreflightCoordinator {
         }
     }
 
-    private func showWindow(force: Bool = false) {
+    /// Show the setup window, creating it if needed.
+    ///
+    /// Automatic callers only open a window that isn't already up. Pulling an
+    /// open one to the front on every status update would drag it over System
+    /// Settings while the user is granting something there. `bringToFront` is
+    /// for when the user asked to see it.
+    private func showWindow(bringToFront: Bool = false) {
         let presentWindow: () -> Void = { [weak self] in
             guard let self else { return }
             if self.windowController == nil {
@@ -281,19 +344,30 @@ final class PreflightCoordinator {
                 controller.onInstallPython = { [weak self] in self?.preflightManager.installPython() }
                 controller.onInstallRuby = { [weak self] in self?.preflightManager.installRuby() }
                 controller.onOpenFullDiskAccess = { [weak self] in self?.preflightManager.openFullDiskAccessPreferences() }
-                controller.onOpenAccessibility = { [weak self] in self?.preflightManager.requestAccessibilityPrompt() }
-                controller.onOpenNotesAutomation = { [weak self] in self?.preflightManager.requestNotesAutomation() }
-                controller.onOpenRemindersAutomation = { [weak self] in self?.preflightManager.requestRemindersAccess() }
-                controller.onOpenPhotosAutomation = { [weak self] in self?.preflightManager.requestPhotosAutomation() }
+                // A macOS prompt takes focus from the window, and when it goes
+                // away focus returns to whichever app had it before, not
+                // necessarily us. Bring the window back once it is answered.
+                controller.onOpenNotesAutomation = { [weak self] in
+                    self?.preflightManager.requestAutomation(for: .notesAutomation) { self?.windowController?.bringToFront() }
+                }
+                controller.onOpenRemindersAutomation = { [weak self] in
+                    self?.preflightManager.requestRemindersAccess { self?.windowController?.bringToFront() }
+                }
+                controller.onOpenPhotosAutomation = { [weak self] in
+                    self?.preflightManager.requestPhotosAutomation { self?.windowController?.bringToFront() }
+                }
+                controller.onOpenPhotosAppAutomation = { [weak self] in
+                    self?.preflightManager.requestAutomation(for: .photosAppAutomation) { self?.windowController?.bringToFront() }
+                }
                 controller.onRefresh = { [weak self] in self?.preflightManager.runFullCheck() }
+                controller.onBecameKey = { [weak self] in self?.preflightManager.refreshPermissions() }
                 controller.onCloseRequested = { [weak self] in self?.handleCloseRequested() }
                 controller.onToggleSuppress = { [weak self] suppress in
                     self?.defaults.set(suppress, forKey: self?.suppressKey ?? "")
                 }
 
                 self.windowController = controller
-                controller.showWindow(nil)
-                controller.window?.makeKeyAndOrderFront(nil)
+                controller.present()
                 self.defaults.set(true, forKey: self.shownKey)
 
                 let snapshot = PreflightSnapshot(
@@ -304,10 +378,13 @@ final class PreflightCoordinator {
                     logs: self.runtimeLogs()
                 )
                 controller.apply(snapshot: snapshot)
-            } else {
-                if force || !(self.windowController?.window?.isVisible ?? false) {
-                    self.windowController?.showWindow(nil)
-                    self.windowController?.window?.makeKeyAndOrderFront(nil)
+            } else if let controller = self.windowController {
+                // Minimised or hidden (Cmd-H) still counts as open: the user put it there.
+                let isOpen = (controller.window?.isVisible ?? false)
+                    || (controller.window?.isMiniaturized ?? false)
+                    || NSApp.isHidden
+                if bringToFront || !isOpen {
+                    controller.present()
                 }
             }
         }
@@ -344,31 +421,31 @@ final class PreflightCoordinator {
                 self.handlePostBackend(
                     showWindowIfAllowed: showWindowIfAllowed,
                     forceShowWindow: forceShowWindow,
-                    snapshot: snapshot,
-                    healthy: healthy
+                    snapshot: snapshot
                 )
             }
         }
     }
 
-    private func handlePostBackend(showWindowIfAllowed: Bool, forceShowWindow: Bool, snapshot: PreflightSnapshot?, healthy: Bool) {
-        if showWindowIfAllowed {
-            if forceShowWindow || !shouldSuppressWhenHealthy {
-                showWindow(force: true)
-                if let snapshot { windowController?.apply(snapshot: snapshot) }
-            } else if shouldSuppressWhenHealthy && healthy {
-                windowController?.close()
-            }
-        }
+    /// Never closes the window. This runs after every status update, and it
+    /// used to close the window whenever the backend was healthy and "Don't
+    /// show this next time" was on - which is the default, and is switched on
+    /// automatically once the essentials are ready. So the window vanished
+    /// the moment the user granted a permission. That setting only decides
+    /// whether the window opens by itself; once open, it stays until closed.
+    private func handlePostBackend(showWindowIfAllowed: Bool, forceShowWindow: Bool, snapshot: PreflightSnapshot?) {
+        guard showWindowIfAllowed, forceShowWindow || !shouldSuppressWhenHealthy else { return }
+        showWindow()
+        if let snapshot { windowController?.apply(snapshot: snapshot) }
     }
 
     private func persistPermissions(statuses: [RequirementStatus]) {
         let permissionKeys: [(Requirement, String)] = [
             (.fullDiskAccess, "full_disk_access"),
-            (.accessibility, "accessibility"),
-            (.notesAutomation, "notes_automation"),
+            (.notesAutomation, AutomationTarget.notes.permissionKey),
             (.remindersAutomation, "reminders_automation"),
             (.photosAutomation, "photos_automation"),
+            (.photosAppAutomation, AutomationTarget.photos.permissionKey),
         ]
 
         var dict: [String: Bool] = [:]
@@ -377,15 +454,10 @@ final class PreflightCoordinator {
             dict[key] = satisfied
         }
 
-        let dataDir = (NSHomeDirectory() as NSString).appendingPathComponent(".icloudbridge")
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: dataDir) {
-            try? fm.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
-        }
-
-        let filePath = (dataDir as NSString).appendingPathComponent("permissions.json")
+        let fileURL = PermissionsFile.url
+        try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         if let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: URL(fileURLWithPath: filePath))
+            try? data.write(to: fileURL)
         }
     }
 

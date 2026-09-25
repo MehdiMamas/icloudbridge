@@ -437,6 +437,41 @@ class MarkdownAdapter:
             logger.error(f"Failed to delete markdown file {file_path}: {e}")
             raise RuntimeError(f"Failed to delete note '{file_path.name}': {e}") from e
 
+    async def move_note(self, file_path: Path, folder_name: str | None) -> Path | None:
+        """
+        Move a markdown file, its metadata and its attachments into another folder.
+
+        Used when a note moved between Apple Notes folders, so the markdown copy
+        follows it instead of being treated as deleted.
+
+        Args:
+            file_path: Current path of the markdown file
+            folder_name: Destination subfolder, or None for the base folder
+
+        Returns:
+            The new path, or None if a different file already occupies it
+        """
+        target_folder = self.base_path / folder_name if folder_name else self.base_path
+        new_path = target_folder / file_path.name
+        if new_path.exists():
+            logger.warning("Cannot move %s: %s already exists", file_path, new_path)
+            return None
+
+        await self.ensure_folder_exists(target_folder)
+        slug = await self.get_attachment_slug(file_path)
+        metadata_file = self._metadata_path(file_path)
+
+        shutil.move(file_path, new_path)
+        if metadata_file.exists():
+            shutil.move(metadata_file, self._metadata_path(new_path))
+        if slug:
+            attachment_folder = file_path.parent / f".attachments.{slug}"
+            if attachment_folder.is_dir():
+                shutil.move(attachment_folder, target_folder / attachment_folder.name)
+
+        logger.info("Moved markdown file: %s -> %s", file_path, new_path)
+        return new_path
+
     def _sync_attachments(
         self,
         base_folder: Path,

@@ -368,6 +368,9 @@ export interface ShortcutStatus {
   name: string;
   installed: boolean;
   url: string;
+  // Installed, but older than the version at `url`
+  update_available: boolean;
+  update_note: string | null;
 }
 
 export interface FullDiskAccessStatus {

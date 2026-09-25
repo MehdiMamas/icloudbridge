@@ -1,8 +1,10 @@
 """AppleScript adapter for interfacing with Apple Notes.app."""
 
 import asyncio
+import contextlib
 import logging
 import re
+import sqlite3
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -77,6 +79,34 @@ tell application "Notes"
 end tell
 """
 
+# AppleScript to list note accounts, default account first
+LIST_ACCOUNTS_SCRIPT = """
+tell application "Notes"
+    set output to name of default account
+    repeat with an_account in accounts
+        set output to output & "|" & (name of an_account)
+    end repeat
+    return output
+end tell
+"""
+
+# AppleScript to create a folder path inside an account, reusing folders that exist
+CREATE_FOLDER_SCRIPT = """
+on run argv
+    tell application "Notes"
+        set parent_container to account (item 1 of argv)
+        repeat with i from 2 to count of argv
+            set part_name to item i of argv
+            if exists folder part_name of parent_container then
+                set parent_container to folder part_name of parent_container
+            else
+                set parent_container to make new folder at parent_container with properties {name:part_name}
+            end if
+        end repeat
+    end tell
+end run
+"""
+
 # AppleScript to get all notes from a folder (supports nested paths)
 GET_NOTES_SCRIPT = """
 on run argv
@@ -120,7 +150,7 @@ on run argv
         end if
 
         set myNotes to notes of myFolder
-        set output to ""
+        set output to (id of myFolder) & "~~~FOLDER~~~"
         repeat with theNote in myNotes
             set nId to id of theNote
             set nName to name of theNote
@@ -373,15 +403,10 @@ end run
 """
 
 
-# Check if Notes app is running
+# Check if Notes app is running. Asking the application object directly needs
+# no Automation permission, unlike querying System Events.
 IS_NOTES_RUNNING_SCRIPT = """
-tell application "System Events"
-    if (get name of every application process) contains "Notes" then
-        return true
-    else
-        return false
-    end if
-end tell
+return application "Notes" is running
 """
 
 
@@ -429,6 +454,37 @@ class AppleScriptFolder:
 
 
 IGNORED_FOLDER_NAMES = {"Recently Deleted"}
+
+NOTE_STORE_PATH = Path.home() / "Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
+
+
+def folder_primary_key(folder_id: str) -> int | None:
+    """Extract the Core Data primary key from an id like x-coredata://.../ICFolder/p80."""
+    _, sep, suffix = folder_id.rpartition("/p")
+    return int(suffix) if sep and suffix.isdigit() else None
+
+
+def special_folder_keys() -> tuple[set[int], set[int]]:
+    """
+    Primary keys of Smart Folders and of Recently Deleted folders, in that order.
+
+    AppleScript lists both as ordinary folders. A Smart Folder's notes are the
+    matching notes from other folders, and syncing one makes the same note
+    appear in two folders, which used to delete it (issue #18). Recently Deleted
+    is found by type because its name is localized.
+    """
+    try:
+        with contextlib.closing(sqlite3.connect(NOTE_STORE_PATH.as_uri() + "?mode=ro", uri=True)) as conn:
+            rows = conn.execute(
+                "SELECT Z_PK, ZFOLDERTYPE, length(ZSMARTFOLDERQUERYJSON) > 0 "
+                "FROM ZICCLOUDSYNCINGOBJECT WHERE ZFOLDERTYPE IS NOT NULL"
+            ).fetchall()
+    except sqlite3.Error as exc:
+        logger.warning("Could not read folder types from %s: %s", NOTE_STORE_PATH, exc)
+        return set(), set()
+    smart = {pk for pk, _, is_smart in rows if is_smart}
+    trash = {pk for pk, folder_type, _ in rows if folder_type == 1}
+    return smart, trash
 
 
 class NotesAdapter:
@@ -637,11 +693,16 @@ class NotesAdapter:
 
     @staticmethod
     def is_ignored_folder(folder_name: str) -> bool:
-        return folder_name.strip() in IGNORED_FOLDER_NAMES
+        # Folder paths carry their account ("iCloud/Recently Deleted")
+        return folder_name.strip().rsplit("/", 1)[-1] in IGNORED_FOLDER_NAMES
 
-    async def list_folders(self) -> list[AppleScriptFolder]:
+    async def list_folders(self, include_unsyncable: bool = False) -> list[AppleScriptFolder]:
         """
         Get all note folders from Apple Notes.
+
+        Args:
+            include_unsyncable: Also return Recently Deleted and Smart Folders,
+                for callers checking whether a name is taken
 
         Returns:
             List of AppleScriptFolder objects
@@ -658,6 +719,7 @@ class NotesAdapter:
                 return []
 
             folders = []
+            smart_keys, trash_keys = special_folder_keys()
             # Split by | delimiter: "uuid~~name|uuid~~name|..."
             for folder_str in output.split("|"):
                 if not folder_str.strip():
@@ -667,9 +729,14 @@ class NotesAdapter:
                 if len(parts) == 2:
                     folder_uuid, folder_name = parts
                     folder_name = folder_name.strip()
-                    if self.is_ignored_folder(folder_name):
-                        logger.debug("Skipping ignored folder: %s", folder_name)
-                        continue
+                    folder_key = folder_primary_key(folder_uuid.strip())
+                    if not include_unsyncable:
+                        if self.is_ignored_folder(folder_name) or folder_key in trash_keys:
+                            logger.debug("Skipping ignored folder: %s", folder_name)
+                            continue
+                        if folder_key in smart_keys:
+                            logger.info("Skipping Smart Folder: %s", folder_name)
+                            continue
                     folders.append(
                         AppleScriptFolder(
                             uuid=folder_uuid.strip(),
@@ -829,6 +896,13 @@ class NotesAdapter:
 
         try:
             output = await self._run_applescript(GET_NOTES_SCRIPT, folder_name)
+            folder_id, _, output = output.partition("~~~FOLDER~~~")
+
+            if folder_primary_key(folder_id.strip()) in special_folder_keys()[0]:
+                raise RuntimeError(
+                    "it is a Smart Folder, which only shows notes stored in other folders. "
+                    "Remove it from the folder mappings."
+                )
 
             if not output or output == "~~~NEXT_NOTE~~~":
                 logger.info(f"No notes found in folder: {folder_name}")
@@ -884,10 +958,15 @@ class NotesAdapter:
             raise RuntimeError(f"Failed to get notes from folder '{folder_name}': {e}") from e
 
     async def get_recently_deleted_notes(self) -> list[AppleScriptNote]:
-        """Return notes currently in the Recently Deleted folder."""
+        """Return notes currently in any account's Recently Deleted folder."""
 
         try:
-            return await self.get_notes("Recently Deleted")
+            _, trash_keys = special_folder_keys()
+            notes: list[AppleScriptNote] = []
+            for folder in await self.list_folders(include_unsyncable=True):
+                if folder_primary_key(folder.uuid) in trash_keys or self.is_ignored_folder(folder.name):
+                    notes.extend(await self.get_notes(folder.name))
+            return notes
         except Exception as exc:
             logger.warning("Failed to load Recently Deleted notes: %s", exc)
             return []
@@ -1014,6 +1093,22 @@ class NotesAdapter:
         except Exception as e:
             logger.error(f"Failed to delete note {note_name}: {e}")
             raise RuntimeError(f"Failed to delete note '{note_name}': {e}") from e
+
+    async def list_accounts(self) -> tuple[str, list[str]]:
+        """Return the default account's name and the names of all accounts."""
+        await self.ensure_notes_running()
+        default, *accounts = (await self._run_applescript(LIST_ACCOUNTS_SCRIPT)).split("|")
+        return default, accounts
+
+    async def create_folder(self, folder_path: str) -> None:
+        """
+        Create a folder, and any missing parents, from a path like "iCloud/Work/Projects".
+
+        The first path component must be an account name.
+        """
+        await self.ensure_notes_running()
+        await self._run_applescript(CREATE_FOLDER_SCRIPT, *folder_path.split("/"))
+        logger.info("Created Apple Notes folder: %s", folder_path)
 
     async def find_notes_by_name(self, folder_name: str, note_name: str) -> list[str]:
         """Return UUIDs of all notes in a folder with the given name."""

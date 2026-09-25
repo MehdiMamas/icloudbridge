@@ -19,9 +19,12 @@ from icloudbridge.api.models import (
     ShortcutStatus,
     FullDiskAccessStatus,
     NotesFolderStatus,
+    PermissionRequest,
     PermissionsResponse,
     ServicePermissionStatus,
 )
+from icloudbridge.sources.notes.shortcuts import UPSERT_TAGS_VERSION, installed_shortcut_version
+from icloudbridge.sources.photos.photokit_bridge import PhotoKitBridgeClient, PhotoKitUnavailable
 from icloudbridge.utils.db import SettingsDB
 from icloudbridge.utils.logging import set_logging_level
 
@@ -126,7 +129,9 @@ async def verify_setup(request: Request, config: ConfigDep) -> SetupVerification
         {
             "shortcut_name": "iCloudBridge_Upsert_Note",
             "display_name": "iCloudBridge - Create Note",
-            "url": "https://www.icloud.com/shortcuts/a7f2bb8d95094b1aafc8828c8e5a3633",
+            "url": "https://www.icloud.com/shortcuts/7584390a886648d6b43b6ab1e150021d",
+            "version": UPSERT_TAGS_VERSION,
+            "update_note": "Keeps note tags when notes sync back from your markdown folder.",
         },
         {
             "shortcut_name": "iCloudBridge_Append_Content_To_Note",
@@ -155,14 +160,22 @@ async def verify_setup(request: Request, config: ConfigDep) -> SetupVerification
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         logger.warning(f"Failed to list shortcuts: {e}")
 
-    shortcut_statuses = [
-        ShortcutStatus(
-            name=shortcut["display_name"],
-            installed=shortcut["shortcut_name"] in installed_shortcuts,
-            url=shortcut["url"],
+    shortcut_statuses = []
+    for shortcut in REQUIRED_SHORTCUTS:
+        installed = shortcut["shortcut_name"] in installed_shortcuts
+        update_available = False
+        if installed and "version" in shortcut:
+            version = installed_shortcut_version(shortcut["shortcut_name"])
+            update_available = version is not None and version < shortcut["version"]
+        shortcut_statuses.append(
+            ShortcutStatus(
+                name=shortcut["display_name"],
+                installed=installed,
+                url=shortcut["url"],
+                update_available=update_available,
+                update_note=shortcut.get("update_note") if update_available else None,
+            )
         )
-        for shortcut in REQUIRED_SHORTCUTS
-    ]
 
     # Check Full Disk Access by trying to read Notes database
     python_path = sys.executable
@@ -279,6 +292,28 @@ def _check_full_disk_access_live() -> bool | None:
         return False
 
 
+@router.post("/permissions/request")
+async def request_permissions(body: PermissionRequest) -> dict[str, str]:
+    """Show the macOS prompts for a service's missing permissions.
+
+    Only the menubar app can show them, so this asks it over its loopback
+    bridge and returns straight away. The answers land in permissions.json,
+    so poll GET /permissions for the outcome.
+    """
+    try:
+        await PhotoKitBridgeClient().request_permissions(body.service)
+    except PhotoKitUnavailable as exc:
+        logger.warning("Permission request for %s failed: %s", body.service, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "The iCloudBridge menu bar app isn't reachable, so it can't ask macOS for "
+                "permissions. Make sure it's running, then try again."
+            ),
+        ) from exc
+    return {"status": "requested"}
+
+
 @router.get("/permissions", response_model=PermissionsResponse)
 async def get_permissions(config: ConfigDep) -> PermissionsResponse:
     """Get per-service permission availability.
@@ -297,10 +332,10 @@ async def get_permissions(config: ConfigDep) -> PermissionsResponse:
             logger.warning("Failed to read permissions.json: %s", exc)
 
     fda = perms.get("full_disk_access", False)
-    accessibility = perms.get("accessibility", False)
     notes_auto = perms.get("notes_automation", False)
     reminders_auto = perms.get("reminders_automation", False)
     photos_auto = perms.get("photos_automation", False)
+    photos_app_auto = perms.get("photos_app_automation", False)
 
     live_fda = _check_full_disk_access_live()
     if live_fda is not None:
@@ -310,12 +345,10 @@ async def get_permissions(config: ConfigDep) -> PermissionsResponse:
     if live_reminders is not None:
         reminders_auto = live_reminders
 
-    # Notes requires all three permissions
+    # Notes requires both permissions
     notes_missing: list[str] = []
     if not fda:
         notes_missing.append("Full Disk Access")
-    if not accessibility:
-        notes_missing.append("Accessibility")
     if not notes_auto:
         notes_missing.append("Apple Notes automation")
 
@@ -326,6 +359,8 @@ async def get_permissions(config: ConfigDep) -> PermissionsResponse:
     photos_missing: list[str] = []
     if not photos_auto:
         photos_missing.append("Apple Photos access")
+    if not photos_app_auto:
+        photos_missing.append("Apple Photos automation")
 
     return PermissionsResponse(
         notes=ServicePermissionStatus(

@@ -154,6 +154,36 @@ class PhotoKitBridgeClient:
 
         return str(response.json().get("authorization", "unknown"))
 
+    async def request_permissions(self, service: str) -> None:
+        """Ask the menubar app to show the macOS prompts for a sync service's
+        missing permissions ("notes", "reminders" or "photos").
+
+        Returns once the prompts have started; the answers reach the backend
+        through permissions.json.
+
+        Raises:
+            PhotoKitUnavailable: if the menubar app cannot be reached.
+        """
+        base, token = self._ensure_loaded()
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{base}/permissions/request",
+                    headers=self._headers(token),
+                    params={"service": service},
+                )
+        except httpx.HTTPError as e:
+            self._base_url = self._token = None
+            raise PhotoKitUnavailable(f"iCloudBridge menubar app unreachable: {e}") from None
+
+        if response.status_code == 401:
+            self._base_url = self._token = None
+            raise PhotoKitUnavailable("iCloudBridge menubar app rejected our token")
+        if response.status_code != 200:
+            raise PhotoKitUnavailable(
+                f"Permission request failed with HTTP {response.status_code}"
+            )
+
     async def is_available(self) -> bool:
         """True when the bridge is reachable and Photos access is granted.
 

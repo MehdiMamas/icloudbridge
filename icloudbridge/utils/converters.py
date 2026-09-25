@@ -118,6 +118,54 @@ def split_markdown_segments(markdown: str) -> list[tuple[str, str]]:
     return [(kind, text) for kind, text in segments if text.strip()]
 
 
+# A Notes tag: "#" then a letter, then letters, digits, "_" or "-", starting a
+# word. That leaves headings ("# Title"), issue numbers ("#18"), URL fragments
+# ("page#top") and link anchors ("](#top)") alone.
+HASHTAG_RE = re.compile(r"[ \t]?(?<!\S)#([^\W\d_][\w-]*)")
+FENCE_RE = re.compile(r"^\s*(```|~~~)")
+INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
+
+def extract_hashtags(markdown: str) -> tuple[str, list[str]]:
+    """
+    Remove Notes-style hashtags from markdown and return them separately.
+
+    Tags written back to Apple Notes as text are just text, so they are
+    stripped here and applied as real tags instead. Code is left untouched.
+    Returns the markdown without tags and the tag names (no "#"), each once.
+    """
+    tags: dict[str, str] = {}
+    lines: list[str] = []
+    in_fence = False
+
+    def take(match: re.Match[str]) -> str:
+        tags.setdefault(match.group(1).casefold(), match.group(1))
+        return ""
+
+    for line in (markdown or "").splitlines():
+        if FENCE_RE.match(line):
+            in_fence = not in_fence
+        if in_fence or FENCE_RE.match(line):
+            lines.append(line)
+            continue
+        # Only rewrite the text between inline code spans
+        parts, last = [], 0
+        for code in INLINE_CODE_RE.finditer(line):
+            parts += [HASHTAG_RE.sub(take, line[last:code.start()]), code.group()]
+            last = code.end()
+        parts.append(HASHTAG_RE.sub(take, line[last:]))
+        stripped = "".join(parts)
+        if stripped != line:
+            # Keep the line's own indentation, not the gap a leading tag left
+            indent = line[: len(line) - len(line.lstrip())]
+            stripped = indent + stripped.strip()
+        # A line that held only tags goes away entirely
+        if stripped.strip() or not line.strip():
+            lines.append(stripped)
+
+    return "\n".join(lines), list(tags.values())
+
+
 def extract_attachment_references(markdown: str) -> list[str]:
     if not markdown:
         return []

@@ -2,6 +2,11 @@ import { create } from 'zustand';
 import { devtools, persist } from 'zustand/middleware';
 import type { AppConfig, StatusResponse } from '../types/api';
 
+// Backend setting recording that the first-run wizard finished. It lives in the
+// backend's settings database, not browser storage, so wiping or reinstalling the
+// backend brings the wizard back.
+export const FIRST_RUN_COMPLETED_SETTING = 'first_run_completed';
+
 interface AppState {
   // Configuration
   config: AppConfig | null;
@@ -23,9 +28,11 @@ interface AppState {
   // First-run wizard
   isFirstRun: boolean;
   setIsFirstRun: (isFirstRun: boolean) => void;
-  wizardCompleted: boolean;
-  setWizardCompleted: (completed: boolean) => void;
   resetWizard: () => void;
+
+  // Page data refresh
+  dataRevision: number;
+  refreshData: () => void;
 
   // WebSocket connection
   wsConnected: boolean;
@@ -78,12 +85,17 @@ export const useAppStore = create<AppState>()(
         setSidebarOpen: (open) => set({ sidebarOpen: open }),
         toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
 
-        // First-run wizard
-        isFirstRun: true,
+        // First-run wizard. Starts false: App's first-run check switches it on only
+        // once it knows the backend is unconfigured, so a configured install never
+        // flashes the wizard (or gets sent back to the Dashboard by it) on load.
+        isFirstRun: false,
         setIsFirstRun: (isFirstRun) => set({ isFirstRun }),
-        wizardCompleted: false,
-        setWizardCompleted: (completed) => set({ wizardCompleted: completed }),
-        resetWizard: () => set({ wizardCompleted: false, isFirstRun: true }),
+        resetWizard: () => set({ isFirstRun: true }),
+
+        // Page data refresh. Pages load their data when they mount, and Layout keys
+        // the routed page on this, so bumping it remounts the page with fresh data.
+        dataRevision: 0,
+        refreshData: () => set((state) => ({ dataRevision: state.dataRevision + 1 })),
 
         // WebSocket connection
         wsConnected: false,
@@ -103,7 +115,6 @@ export const useAppStore = create<AppState>()(
         partialize: (state) => ({
           theme: state.theme,
           sidebarOpen: state.sidebarOpen,
-          wizardCompleted: state.wizardCompleted,
         }),
       }
     )

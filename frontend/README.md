@@ -17,7 +17,7 @@ Modern web interface for iCloudBridge - Sync Apple Notes, Reminders, and Passwor
 
 ### Prerequisites
 
-- Node.js 18+ and npm
+- Node.js 20.19+ and npm
 - iCloudBridge API server running (default: http://localhost:8000)
 
 ### Installation

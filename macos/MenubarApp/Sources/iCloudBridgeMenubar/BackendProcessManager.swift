@@ -86,7 +86,11 @@ final class BackendProcessManager {
     func killProcessesOnPort(_ port: Int) {
         let lsof = Process()
         lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        lsof.arguments = ["-ti", "tcp:\(port)"]
+        // Only the listener. Unfiltered, lsof also lists every client connected
+        // to the port - including this app's own health checks - so quitting
+        // sent SIGTERM to ourselves. macOS then saw the app killed rather than
+        // quit, and "Quit & Reopen" in Privacy & Security never relaunched it.
+        lsof.arguments = ["-ti", "tcp:\(port)", "-sTCP:LISTEN"]
 
         let pipe = Pipe()
         lsof.standardOutput = pipe
@@ -106,7 +110,8 @@ final class BackendProcessManager {
             .split(whereSeparator: { $0.isNewline })
             .compactMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
 
-        for pid in pids {
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        for pid in pids where pid != ownPID {
             let kill = Process()
             kill.executableURL = URL(fileURLWithPath: "/bin/kill")
             kill.arguments = ["-TERM", String(pid)]

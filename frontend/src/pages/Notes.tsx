@@ -528,6 +528,24 @@ export default function Notes() {
       )}
 
       {/* Setup Verification Warning */}
+      {verification?.shortcuts.some((s) => s.update_available) && (
+        <Alert>
+          <AlertTitle>Shortcut update available</AlertTitle>
+          <AlertDescription>
+            {verification.shortcuts
+              .filter((s) => s.update_available)
+              .map((s) => (
+                <p key={s.name}>
+                  {s.name}: {s.update_note}{' '}
+                  <a href={s.url} target="_blank" rel="noreferrer" className="font-medium underline">
+                    Install the update
+                  </a>
+                </p>
+              ))}
+          </AlertDescription>
+        </Alert>
+      )}
+
       {verification && !verification.all_ready && (
         <Alert variant="warning" className="border-orange-500 bg-orange-50">
           <AlertTriangle className="h-4 w-4" />

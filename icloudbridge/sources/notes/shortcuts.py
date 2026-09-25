@@ -3,13 +3,60 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import plistlib
+import re
+import sqlite3
 import subprocess
 import tempfile
 from pathlib import Path
 
 from icloudbridge.utils.converters import add_markdown_soft_breaks, insert_markdown_blank_line_markers
 logger = logging.getLogger(__name__)
+
+SHORTCUTS_DB_PATH = Path.home() / "Library/Shortcuts/Shortcuts.sqlite"
+VERSION_RE = re.compile(r"iCloudBridge version:\s*(\d+)")
+
+# The first Upsert version that applies tags passed as a third input field
+UPSERT_TAGS_VERSION = 2
+
+
+def installed_shortcut_version(name: str) -> int | None:
+    """
+    Version of an installed iCloudBridge Shortcut, from the "iCloudBridge
+    version: N" line in its leading comment. Shortcuts from before versioning
+    have no such line and count as version 1.
+
+    Returns None when the Shortcut is not installed or the library can't be read.
+    """
+    try:
+        with contextlib.closing(sqlite3.connect(SHORTCUTS_DB_PATH.as_uri() + "?mode=ro", uri=True)) as conn:
+            row = conn.execute(
+                "SELECT a.ZDATA FROM ZSHORTCUT s JOIN ZSHORTCUTACTIONS a ON a.ZSHORTCUT = s.Z_PK "
+                "WHERE s.ZNAME = ? AND NOT coalesce(s.ZTOMBSTONED, 0)",
+                (name,),
+            ).fetchone()
+    except sqlite3.Error as exc:
+        logger.warning("Could not read the Shortcuts library at %s: %s", SHORTCUTS_DB_PATH, exc)
+        return None
+    if not row or not row[0]:
+        return None
+    return shortcut_version_from_actions(row[0])
+
+
+def shortcut_version_from_actions(actions_plist: bytes) -> int:
+    """Read the version marker from a Shortcut's serialized action list."""
+    try:
+        actions = plistlib.loads(actions_plist)
+    except Exception:  # noqa: BLE001 - an unreadable Shortcut is simply unversioned
+        return 1
+    for action in actions[:1]:
+        comment = action.get("WFWorkflowActionParameters", {}).get("WFCommentActionText", "")
+        match = VERSION_RE.search(comment or "")
+        if match:
+            return int(match.group(1))
+    return 1
 
 
 class NotesShortcutAdapter:
@@ -21,11 +68,19 @@ class NotesShortcutAdapter:
 
     def __init__(self, call_log: list[dict[str, str | None]] | None = None) -> None:
         self.call_log = call_log if call_log is not None else []
+        self._supports_tags: bool | None = None
 
-    async def upsert_note(self, folder: str, title: str) -> None:
+    def supports_tags(self) -> bool:
+        """Whether the installed Upsert Shortcut can apply tags (checked once)."""
+        if self._supports_tags is None:
+            version = installed_shortcut_version(self.UPSERT_SHORTCUT)
+            self._supports_tags = version is not None and version >= UPSERT_TAGS_VERSION
+        return self._supports_tags
+
+    async def upsert_note(self, folder: str, title: str, tags: list[str] | None = None) -> None:
         folder = self._normalize_folder(folder)
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._run_upsert, folder, title)
+        await loop.run_in_executor(None, self._run_upsert, folder, title, tags or [])
 
     async def append_checklist(self, folder: str, title: str, checklist_markdown: str) -> None:
         folder = self._normalize_folder(folder)
@@ -62,8 +117,13 @@ class NotesShortcutAdapter:
             return parts[1]
         return folder
 
-    def _run_upsert(self, folder: str, title: str) -> None:
+    def _run_upsert(self, folder: str, title: str, tags: list[str]) -> None:
+        # The tags field is left out entirely when empty: the Shortcut only reads
+        # it when there are more than two fields, as Shortcuts treats an empty
+        # field unpredictably and would prompt for a tag name.
         data = f"{folder};;{title}"
+        if tags:
+            data += ";;" + ",".join(tags)
         cmd = ["shortcuts", "run", self.UPSERT_SHORTCUT]
         result = subprocess.run(
             cmd,
@@ -85,7 +145,11 @@ class NotesShortcutAdapter:
         title: str,
         payload: str,
     ) -> None:
-        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as tmp_file:
+        # The .txt suffix matters: without one, macOS guesses the type from the
+        # content, and a note with enough code in it (a few Python imports) reads
+        # as a script. The Shortcut then gets the file's name, not its text, and
+        # fails with "you asked for item 2, but the list only has 1".
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as tmp_file:
             tmp_file.write(payload)
             tmp_path = Path(tmp_file.name)
 

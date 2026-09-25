@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { CheckCircle, ArrowRight, ArrowLeft, Loader2, FileText, Calendar, Key, Download, Shield, AlertTriangle, AlertCircle, ExternalLink, Image as ImageIcon } from 'lucide-react';
 import confetti from 'canvas-confetti';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Dialog,
   DialogContent,
@@ -17,9 +18,10 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Progress } from '@/components/ui/progress';
 import { FolderBrowserDialog } from '@/components/FolderBrowserDialog';
-import { useAppStore } from '@/store/app-store';
+import { FIRST_RUN_COMPLETED_SETTING, useAppStore } from '@/store/app-store';
 import { useSyncStore } from '@/store/sync-store';
 import apiClient from '@/lib/api-client';
+import MissingPermissionsAlert from '@/components/MissingPermissionsAlert';
 import type { AppConfig, ConnectionTestResponse, SetupVerificationResponse, PermissionsResponse } from '@/types/api';
 
 const ANALYZE_REGEX = /Analyzing file (\d+) of (\d+)/i;
@@ -60,8 +62,10 @@ const STEPS = [
 type PasswordProvider = 'vaultwarden' | 'nextcloud';
 
 export default function FirstRunWizard() {
-  const { isFirstRun, setIsFirstRun, setWizardCompleted, setConfig } = useAppStore();
+  const { isFirstRun, setIsFirstRun, setConfig, refreshData } = useAppStore();
   const { activeSyncs } = useSyncStore();
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
   const [currentStep, setCurrentStep] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -177,6 +181,15 @@ export default function FirstRunWizard() {
       apiClient.getPermissions().then(setPermissions).catch(() => {});
     }
   }, [isFirstRun]);
+
+  // The wizard is modal, so the page routed behind it is the one the user sees
+  // around it and lands on when it closes. Keep that the Dashboard, whatever
+  // URL the app was opened on.
+  useEffect(() => {
+    if (isFirstRun && pathname !== '/') {
+      navigate('/', { replace: true });
+    }
+  }, [isFirstRun, pathname, navigate]);
 
   const buildConfigPayload = useCallback((): Partial<AppConfig> => {
     const configUpdate: Partial<AppConfig> = {
@@ -523,8 +536,12 @@ export default function FirstRunWizard() {
       console.log('All settings saved successfully');
 
       // Mark wizard as complete
-      setWizardCompleted(true);
+      await apiClient.updateSettings([{ key: FIRST_RUN_COMPLETED_SETTING, value: 'true' }]);
       setIsFirstRun(false);
+
+      // The page behind the wizard loaded its data (setup checks, status, config)
+      // before anything was configured; reload it so no stale warnings remain.
+      refreshData();
     } catch (err) {
       console.error('Failed to save configuration:', err);
       const errorMessage = err instanceof Error ? err.message : 'Failed to save configuration';
@@ -696,14 +713,12 @@ export default function FirstRunWizard() {
 
             <div className="space-y-4">
               {permissions && !permissions.notes.permitted && (
-                <Alert variant="destructive">
-                  <AlertTriangle className="h-4 w-4" />
-                  <AlertTitle>Missing Permissions</AlertTitle>
-                  <AlertDescription>
-                    Notes sync requires: {permissions.notes.missing.join(', ')}.
-                    Grant these in the iCloudBridge Setup window, then restart the app.
-                  </AlertDescription>
-                </Alert>
+                <MissingPermissionsAlert
+                  service="notes"
+                  label="Notes sync"
+                  status={permissions.notes}
+                  onPermissionsChange={setPermissions}
+                />
               )}
               <div className="flex items-center justify-between p-4 border rounded-lg">
                 <div>
@@ -714,7 +729,7 @@ export default function FirstRunWizard() {
                 </div>
                 <Switch
                   checked={formData.notes_enabled ?? false}
-                  disabled={permissions !== null && !permissions.notes.permitted}
+                  disabled={!formData.notes_enabled && permissions !== null && !permissions.notes.permitted}
                   onCheckedChange={(checked) =>
                     setFormData({ ...formData, notes_enabled: checked })
                   }
@@ -775,15 +790,25 @@ export default function FirstRunWizard() {
                                 <CheckCircle className="w-3 h-3 text-green-500 absolute -top-1 -right-1 bg-white rounded-full" />
                               )}
                             </div>
-                            <span className="text-sm font-medium">{shortcut.name}</span>
+                            <div>
+                              <span className="text-sm font-medium">{shortcut.name}</span>
+                              {shortcut.update_available && shortcut.update_note && (
+                                <p className="text-xs text-muted-foreground">Update available: {shortcut.update_note}</p>
+                              )}
+                            </div>
                           </div>
                           <Button
                             size="sm"
-                            variant={shortcut.installed ? "outline" : "default"}
-                            disabled={shortcut.installed}
+                            variant={shortcut.installed && !shortcut.update_available ? "outline" : "default"}
+                            disabled={shortcut.installed && !shortcut.update_available}
                             onClick={() => window.open(shortcut.url, '_blank')}
                           >
-                            {shortcut.installed ? (
+                            {shortcut.update_available ? (
+                              <>
+                                <ExternalLink className="w-4 h-4 mr-1" />
+                                Update
+                              </>
+                            ) : shortcut.installed ? (
                               <>
                                 <CheckCircle className="w-4 h-4 mr-1" />
                                 Installed
@@ -886,14 +911,12 @@ export default function FirstRunWizard() {
 
             <div className="space-y-4">
               {permissions && !permissions.reminders.permitted && (
-                <Alert variant="destructive">
-                  <AlertTriangle className="h-4 w-4" />
-                  <AlertTitle>Missing Permissions</AlertTitle>
-                  <AlertDescription>
-                    Reminders sync requires: {permissions.reminders.missing.join(', ')}.
-                    Grant these in the iCloudBridge Setup window, then restart the app.
-                  </AlertDescription>
-                </Alert>
+                <MissingPermissionsAlert
+                  service="reminders"
+                  label="Reminders sync"
+                  status={permissions.reminders}
+                  onPermissionsChange={setPermissions}
+                />
               )}
               <div className="flex items-center justify-between p-4 border rounded-lg">
                 <div>
@@ -904,7 +927,7 @@ export default function FirstRunWizard() {
                 </div>
                 <Switch
                   checked={formData.reminders_enabled}
-                  disabled={permissions !== null && !permissions.reminders.permitted}
+                  disabled={!formData.reminders_enabled && permissions !== null && !permissions.reminders.permitted}
                   onCheckedChange={(checked) =>
                     setFormData({ ...formData, reminders_enabled: checked })
                   }
@@ -1284,14 +1307,12 @@ export default function FirstRunWizard() {
             </div>
 
             {permissions && !permissions.photos.permitted && (
-              <Alert variant="destructive">
-                <AlertTriangle className="h-4 w-4" />
-                <AlertTitle>Missing Permissions</AlertTitle>
-                <AlertDescription>
-                  Photos sync requires: {permissions.photos.missing.join(', ')}.
-                  Grant these in the iCloudBridge Setup window, then restart the app.
-                </AlertDescription>
-              </Alert>
+              <MissingPermissionsAlert
+                service="photos"
+                label="Photos sync"
+                status={permissions.photos}
+                onPermissionsChange={setPermissions}
+              />
             )}
             <div className="flex items-center justify-between p-4 border rounded-lg">
               <div>
@@ -1302,7 +1323,7 @@ export default function FirstRunWizard() {
               </div>
               <Switch
                 checked={formData.photos_enabled ?? false}
-                disabled={permissions !== null && !permissions.photos.permitted}
+                disabled={!formData.photos_enabled && permissions !== null && !permissions.photos.permitted}
                 onCheckedChange={(checked) =>
                   setFormData({ ...formData, photos_enabled: checked })
                 }

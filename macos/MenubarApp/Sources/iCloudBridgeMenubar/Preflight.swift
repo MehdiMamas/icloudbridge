@@ -18,13 +18,55 @@ enum RequirementCategory: String, CaseIterable {
         }
     }
 
-    var subtitle: String? {
+    var subtitle: String {
         switch self {
-        case .essential: return nil
-        case .notes: return "Required to sync Apple Notes"
-        case .reminders: return "Required to sync Apple Reminders"
-        case .photos: return "Required to sync Apple Photos"
+        case .essential: return "Needed for iCloudBridge to run at all"
+        case .notes: return "Needed only for Apple Notes sync"
+        case .reminders: return "Needed only for Apple Reminders sync"
+        case .photos: return "Needed only for Apple Photos sync"
         }
+    }
+
+    /// Only essentials stop the backend from starting. Everything else is a
+    /// macOS permission for one sync feature, and can be skipped by anyone not
+    /// using that feature.
+    var isOptional: Bool {
+        self != .essential
+    }
+}
+
+/// An app the backend drives with AppleScript (`osascript`).
+///
+/// macOS attributes those Apple Events to iCloudBridge, as the app that
+/// launched the backend, so this is where Automation access has to be granted.
+/// Keep this in step with the `tell application` targets under
+/// `icloudbridge/sources/`: a target missing here is one the user gets asked
+/// about in the middle of a sync instead of during setup.
+struct AutomationTarget {
+    let appName: String
+    let bundleIdentifier: String
+    /// The key this target's access is recorded under in permissions.json.
+    let permissionKey: String
+
+    static let notes = AutomationTarget(appName: "Notes", bundleIdentifier: "com.apple.Notes", permissionKey: "notes_automation")
+    static let photos = AutomationTarget(appName: "Photos", bundleIdentifier: "com.apple.Photos", permissionKey: "photos_app_automation")
+}
+
+/// `~/.icloudbridge/permissions.json`: which permissions setup last found
+/// granted. The backend reads it to decide which sync features can be enabled.
+enum PermissionsFile {
+    static var url: URL {
+        URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".icloudbridge", isDirectory: true)
+            .appendingPathComponent("permissions.json")
+    }
+
+    static func read() -> [String: Bool] {
+        guard let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Bool] else {
+            return [:]
+        }
+        return object
     }
 }
 
@@ -34,10 +76,12 @@ enum Requirement: CaseIterable {
     case python
     case ruby
     case fullDiskAccess
-    case accessibility
     case notesAutomation
     case remindersAutomation
+    /// Photo library access through PhotoKit, used by the app itself.
     case photosAutomation
+    /// Apple Events to Photos, used by the backend's AppleScript.
+    case photosAppAutomation
 
     var title: String {
         switch self {
@@ -46,10 +90,10 @@ enum Requirement: CaseIterable {
         case .python: return "Python 3.12 (Homebrew)"
         case .ruby: return "Ruby >= 3.4 (Homebrew)"
         case .fullDiskAccess: return "Full Disk Access"
-        case .accessibility: return "Accessibility"
-        case .notesAutomation: return "Apple Notes"
+        case .notesAutomation: return "Notes Automation"
         case .remindersAutomation: return "Apple Reminders"
-        case .photosAutomation: return "Apple Photos"
+        case .photosAutomation: return "Photos Library"
+        case .photosAppAutomation: return "Photos Automation"
         }
     }
 
@@ -57,17 +101,26 @@ enum Requirement: CaseIterable {
         switch self {
         case .homebrew, .xcodeCommandLineTools, .python, .ruby:
             return .essential
-        case .fullDiskAccess, .accessibility, .notesAutomation:
+        case .fullDiskAccess, .notesAutomation:
             return .notes
         case .remindersAutomation:
             return .reminders
-        case .photosAutomation:
+        case .photosAutomation, .photosAppAutomation:
             return .photos
         }
     }
 
     var isEssential: Bool {
         category == .essential
+    }
+
+    /// The app this requirement grants Automation (Apple Events) access to.
+    var automationTarget: AutomationTarget? {
+        switch self {
+        case .notesAutomation: return .notes
+        case .photosAppAutomation: return .photos
+        default: return nil
+        }
     }
 }
 
@@ -230,9 +283,13 @@ final class Shell {
 
 final class PreflightManager {
     private let queue = DispatchQueue(label: "app.icloudbridge.preflight")
+    // Permission requests block until the user answers the macOS prompt, so they
+    // get their own queue rather than waiting behind (or holding up) installs.
+    private let permissionQueue = DispatchQueue(label: "app.icloudbridge.preflight.permissions")
     private var statuses: [RequirementStatus] = Requirement.allCases.map { RequirementStatus(requirement: $0, state: .pending) }
     private var brewPath: String?
     private var installing = Set<Requirement>()
+    private let defaults = UserDefaults.standard
 
     var onEvent: ((PreflightEvent) -> Void)?
 
@@ -246,10 +303,10 @@ final class PreflightManager {
         update(.python, state: .checking)
         update(.ruby, state: .checking)
         update(.fullDiskAccess, state: .checking)
-        update(.accessibility, state: .checking)
         update(.notesAutomation, state: .checking)
         update(.remindersAutomation, state: .checking)
         update(.photosAutomation, state: .checking)
+        update(.photosAppAutomation, state: .checking)
 
         queue.async { [weak self] in
             guard let self else { return }
@@ -278,21 +335,29 @@ final class PreflightManager {
                 self.installIfNeeded(.homebrew)
             }
 
-            let fdaState = self.checkFullDiskAccess()
-            self.update(.fullDiskAccess, state: fdaState)
-
-            let accessibilityState = self.checkAccessibilityStatus()
-            self.update(.accessibility, state: accessibilityState)
-
-            let notesState = self.checkAutomationPermission(appName: "Notes", requestIfNeeded: false)
-            self.update(.notesAutomation, state: notesState)
-
-            let remindersState = self.checkRemindersPermission(requestIfNeeded: false)
-            self.update(.remindersAutomation, state: remindersState)
-
-            let photosState = self.checkPhotosPermission(requestIfNeeded: false)
-            self.update(.photosAutomation, state: photosState)
+            self.checkPermissions()
         }
+    }
+
+    /// Re-check the macOS permissions, without prompting or touching installs.
+    ///
+    /// Full Disk Access is granted in System Settings, not through a prompt, so
+    /// nothing tells us when it changes. The setup window calls this whenever it
+    /// regains focus, which is when the user comes back from granting it.
+    func refreshPermissions() {
+        permissionQueue.async { [weak self] in
+            self?.checkPermissions()
+        }
+    }
+
+    /// Check-only: nothing here may show a prompt. The user asks for those with
+    /// the row buttons, so a prompt never appears without an obvious cause.
+    private func checkPermissions() {
+        update(.fullDiskAccess, state: checkFullDiskAccess())
+        update(.notesAutomation, state: checkAutomationPermission(for: .notes))
+        update(.remindersAutomation, state: checkRemindersPermission(requestIfNeeded: false))
+        update(.photosAutomation, state: checkPhotosPermission(requestIfNeeded: false))
+        update(.photosAppAutomation, state: checkAutomationPermission(for: .photos))
     }
 
     func installHomebrew() {
@@ -393,55 +458,162 @@ final class PreflightManager {
         NSWorkspace.shared.open(url)
     }
 
-    func openAccessibilityPreferences() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }
-        NSWorkspace.shared.open(url)
-    }
-
     func openAutomationPreferences() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") else { return }
         NSWorkspace.shared.open(url)
     }
 
-    private func checkAccessibilityStatus() -> RequirementState {
-        if AXIsProcessTrusted() {
-            return .satisfied("Accessibility permission granted")
+    // MARK: Automation (Apple Events)
+
+    /// Check Automation access to `target` without ever prompting.
+    ///
+    /// macOS can only answer for an app that is running, and opening Notes or
+    /// Photos on every check would be a surprise of its own. When the app is
+    /// closed, fall back to the last answer macOS gave; failing that, say so
+    /// and leave it to Request Access, which opens the app first.
+    private func checkAutomationPermission(for target: AutomationTarget) -> RequirementState {
+        let status = determineAutomationPermission(for: target, askUserIfNeeded: false)
+        guard Int(status) == procNotFound else {
+            return automationState(for: status, target: target)
         }
-        return .actionRequired("Allow Accessibility control")
+        switch cachedAutomationDecision(for: target) {
+        case true?:
+            return automationState(for: OSStatus(noErr), target: target)
+        case false?:
+            return automationState(for: OSStatus(errAEEventNotPermitted), target: target)
+        case nil:
+            return .actionRequired("Not checked yet, as \(target.appName) isn't open. Click Request Access to open it in the background and ask")
+        }
     }
 
-    @discardableResult
-    private func checkAutomationPermission(appName: String, requestIfNeeded: Bool) -> RequirementState {
-        let scriptSource: String
-        switch appName {
-        case "Notes":
-            scriptSource = "tell application \"Notes\" to get id of default account"
-        case "Reminders":
-            scriptSource = "tell application \"Reminders\" to get name of default list"
-        default:
-            scriptSource = ""
-        }
+    /// Ask for Automation access to the app behind `requirement`.
+    ///
+    /// This is the only place an Automation prompt is shown. `completion` runs
+    /// on the main thread once macOS has an answer, unless the user was sent
+    /// on to System Settings instead.
+    func requestAutomation(for requirement: Requirement, completion: (() -> Void)? = nil) {
+        guard let target = requirement.automationTarget else { return }
+        update(requirement, state: .installing("Waiting for your answer to the macOS prompt…"))
 
-        guard let script = NSAppleScript(source: scriptSource) else {
-            return .failed("Could not create automation request for \(appName)")
-        }
-
-        var errorInfo: NSDictionary?
-        if requestIfNeeded {
-            _ = script.executeAndReturnError(&errorInfo)
-        } else {
-            _ = script.executeAndReturnError(&errorInfo)
-        }
-
-        if let errorInfo, let code = errorInfo[NSAppleScript.errorNumber] as? Int {
-            if code == -1743 || code == -1744 {
-                return .actionRequired("Allow Automation control of \(appName) in Privacy & Security > Automation")
+        permissionQueue.async { [weak self] in
+            guard let self else { return }
+            var status = self.determineAutomationPermission(for: target, askUserIfNeeded: true)
+            if Int(status) == procNotFound {
+                self.update(requirement, state: .installing("Opening \(target.appName) in the background…"))
+                status = self.launchAndRequestAutomation(for: target)
             }
-            let message = errorInfo[NSAppleScript.errorMessage] as? String ?? "Unknown error"
-            return .failed("Automation error for \(appName): \(message)")
+            self.update(requirement, state: self.automationState(for: status, target: target))
+
+            DispatchQueue.main.async {
+                if Int(status) == errAEEventNotPermitted {
+                    // Once denied, macOS never asks again; only System Settings can change it.
+                    self.openAutomationPreferences()
+                } else {
+                    completion?()
+                }
+            }
+        }
+    }
+
+    /// Launch `target` hidden and without activating it, so the setup window
+    /// keeps focus, then ask.
+    ///
+    /// The app is left running; the backend starts it on every sync anyway.
+    private func launchAndRequestAutomation(for target: AutomationTarget) -> OSStatus {
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: target.bundleIdentifier) else {
+            return OSStatus(procNotFound)
         }
 
-        return .satisfied("Automation permission granted for \(appName)")
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        configuration.hides = true
+        configuration.addsToRecentItems = false
+
+        let launched = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, error in
+                if let error {
+                    NSLog("Could not open \(target.appName) to ask for Automation access: \(error.localizedDescription)")
+                }
+                launched.signal()
+            }
+        }
+        _ = launched.wait(timeout: .now() + 30)
+
+        // The launch can report success a moment before the app is registered to
+        // receive Apple Events, and until then macOS still calls it not running.
+        let deadline = Date().addingTimeInterval(15)
+        var status = OSStatus(procNotFound)
+        while Date() < deadline {
+            status = determineAutomationPermission(for: target, askUserIfNeeded: true)
+            if Int(status) != procNotFound { break }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        return status
+    }
+
+    /// Never call on the main thread with `askUserIfNeeded`: it blocks until
+    /// the user answers the prompt.
+    private func determineAutomationPermission(for target: AutomationTarget, askUserIfNeeded: Bool) -> OSStatus {
+        let descriptor = NSAppleEventDescriptor(bundleIdentifier: target.bundleIdentifier)
+        // Wildcards ask about every event: the backend sends many different
+        // ones, and macOS grants Automation per app, not per event.
+        let status = withExtendedLifetime(descriptor) {
+            AEDeterminePermissionToAutomateTarget(descriptor.aeDesc, typeWildCard, typeWildCard, askUserIfNeeded)
+        }
+        recordAutomationDecision(status, for: target)
+        return status
+    }
+
+    private func automationState(for status: OSStatus, target: AutomationTarget) -> RequirementState {
+        switch Int(status) {
+        case Int(noErr):
+            return .satisfied("Allowed to control \(target.appName)")
+        case errAEEventNotPermitted:
+            return .actionRequired("Denied. Turn on \(target.appName) under iCloudBridge in System Settings > Privacy & Security > Automation")
+        case errAEEventWouldRequireUserConsent:
+            return .actionRequired("Not allowed yet. Click Request Access to let iCloudBridge control \(target.appName)")
+        case procNotFound:
+            return .failed("Could not open \(target.appName) to ask for access")
+        default:
+            return .failed("Could not check access to \(target.appName) (error \(status))")
+        }
+    }
+
+    private func automationCacheKey(for target: AutomationTarget) -> String {
+        "preflight.automation.\(target.bundleIdentifier)"
+    }
+
+    /// Remember macOS's last definitive answer, for checks made while the app is closed.
+    private func recordAutomationDecision(_ status: OSStatus, for target: AutomationTarget) {
+        let key = automationCacheKey(for: target)
+        switch Int(status) {
+        case Int(noErr):
+            defaults.set(true, forKey: key)
+        case errAEEventNotPermitted:
+            defaults.set(false, forKey: key)
+        case errAEEventWouldRequireUserConsent:
+            // Undecided again, e.g. after `tccutil reset`.
+            defaults.removeObject(forKey: key)
+        default:
+            break
+        }
+    }
+
+    private func cachedAutomationDecision(for target: AutomationTarget) -> Bool? {
+        let key = automationCacheKey(for: target)
+        if defaults.object(forKey: key) != nil {
+            return defaults.bool(forKey: key)
+        }
+        // Earlier versions checked Notes by scripting it, opening Notes on every
+        // launch, and kept only the result in permissions.json. Trust a grant
+        // recorded there, so an upgrade doesn't report Notes sync as missing a
+        // permission just because Notes isn't open yet.
+        if PermissionsFile.read()[target.permissionKey] == true {
+            defaults.set(true, forKey: key)
+            return true
+        }
+        return nil
     }
 
     private func update(_ requirement: Requirement, state: RequirementState) {
@@ -471,7 +643,7 @@ final class PreflightManager {
             installPython()
         case .ruby:
             installRuby()
-        case .fullDiskAccess, .accessibility, .notesAutomation, .remindersAutomation, .photosAutomation:
+        case .fullDiskAccess, .notesAutomation, .remindersAutomation, .photosAutomation, .photosAppAutomation:
             break
         }
     }
@@ -586,8 +758,11 @@ final class PreflightManager {
     private func checkRemindersPermission(requestIfNeeded: Bool) -> RequirementState {
         let status = EKEventStore.authorizationStatus(for: .reminder)
         switch status {
-        case .authorized, .fullAccess, .writeOnly:
+        case .authorized, .fullAccess:
             return .satisfied("Reminders permission granted")
+        case .writeOnly:
+            // The backend reads reminders, which write-only access does not allow
+            return .actionRequired("Reminders access is add-only. Allow full access in System Settings > Privacy & Security > Reminders")
         case .notDetermined:
             if !requestIfNeeded {
                 return .actionRequired("Allow Reminders access")
@@ -595,11 +770,20 @@ final class PreflightManager {
             let store = EKEventStore()
             let semaphore = DispatchSemaphore(value: 0)
             var granted = false
-            store.requestAccess(to: .reminder) { ok, _ in
+            let completion: (Bool, Error?) -> Void = { ok, _ in
                 granted = ok
                 semaphore.signal()
             }
-            _ = semaphore.wait(timeout: .now() + 5)
+            // Full access, as the backend asks for; the older call is all macOS 13 has.
+            if #available(macOS 14.0, *) {
+                store.requestFullAccessToReminders(completion: completion)
+            } else {
+                store.requestAccess(to: .reminder, completion: completion)
+            }
+            // Only reached from requestRemindersAccess, off the main thread, so
+            // give the user time to read the prompt. A late answer is still
+            // picked up when the setup window next regains focus.
+            _ = semaphore.wait(timeout: .now() + 300)
             return granted ? .satisfied("Reminders permission granted") : .actionRequired("Allow Reminders access")
         case .denied, .restricted:
             return .actionRequired("Allow Reminders access in System Settings > Privacy & Security > Reminders")
@@ -631,58 +815,11 @@ final class PreflightManager {
     }
 
     // User-initiated permission requests
-    func requestAccessibilityPrompt() {
+    /// `completion` runs on the main thread once the prompt has been answered.
+    func requestPhotosAutomation(completion: (() -> Void)? = nil) {
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true] as CFDictionary
-            _ = AXIsProcessTrustedWithOptions(options)
-            // Poll for a short window to allow TCC to record the new trust decision without forcing a relaunch.
-            self.pollAccessibilityStatus(start: Date(), openSettingsOnFailure: true)
-        }
-    }
-
-    private func pollAccessibilityStatus(start: Date, attempt: Int = 0, openSettingsOnFailure: Bool = false) {
-        let state = checkAccessibilityStatus()
-        if state.isSatisfied {
-            update(.accessibility, state: state)
-            return
-        }
-
-        let elapsed = Date().timeIntervalSince(start)
-        if elapsed > 15 {
-            update(.accessibility, state: state)
-            if openSettingsOnFailure {
-                DispatchQueue.main.async { [weak self] in
-                    self?.openAccessibilityPreferences()
-                }
-            }
-            return
-        }
-
-        let delay = min(2.0, 0.5 + Double(attempt) * 0.25)
-        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
-            self?.pollAccessibilityStatus(start: start, attempt: attempt + 1, openSettingsOnFailure: openSettingsOnFailure)
-        }
-    }
-
-    func requestNotesAutomation() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            let state = self.checkAutomationPermission(appName: "Notes", requestIfNeeded: true)
-            self.update(.notesAutomation, state: state)
-
-            // If the user denies or the prompt does not appear, surface the System Settings panel.
-            if !state.isSatisfied {
-                self.openAutomationPreferences()
-            }
-        }
-    }
-
-    func requestPhotosAutomation() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
             PHPhotoLibrary.requestAuthorization(for: .readWrite) { auth in
-                DispatchQueue.main.async { [weak self] in
+                DispatchQueue.main.async {
                     guard let self else { return }
                     let finalState: RequirementState
                     if auth == .authorized || auth == .limited {
@@ -691,13 +828,20 @@ final class PreflightManager {
                         finalState = .actionRequired("Allow Photos access in System Settings > Privacy & Security > Photos")
                     }
                     self.update(.photosAutomation, state: finalState)
+                    completion?()
                 }
             }
         }
     }
 
-    func requestRemindersAccess() {
-        let state = checkRemindersPermission(requestIfNeeded: true)
-        update(.remindersAutomation, state: state)
+    /// `completion` runs on the main thread once the prompt has been answered.
+    func requestRemindersAccess(completion: (() -> Void)? = nil) {
+        // Waits for the user's answer, which must not block the main thread.
+        permissionQueue.async { [weak self] in
+            guard let self else { return }
+            let state = self.checkRemindersPermission(requestIfNeeded: true)
+            self.update(.remindersAutomation, state: state)
+            DispatchQueue.main.async { completion?() }
+        }
     }
 }

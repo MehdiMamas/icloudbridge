@@ -12,7 +12,7 @@ import apiClient from '@/lib/api-client';
 import type { ServiceStatus, SetupVerificationResponse } from '@/types/api';
 
 export default function Dashboard() {
-  const { status, setStatus, wsConnected, config, configLoaded, setConfig } = useAppStore();
+  const { status, setStatus, wsConnected, config, configLoaded, setConfig, isFirstRun } = useAppStore();
   const { activeSyncs, logs } = useSyncStore();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -200,8 +200,9 @@ export default function Dashboard() {
         </Alert>
       )}
 
-      {/* Setup Verification Warning */}
-      {showSetupWarning && verification && notesEnabled && (
+      {/* Setup Verification Warning (not behind the first-run wizard, where Notes
+          reads as enabled only because nothing has been configured yet) */}
+      {showSetupWarning && verification && notesEnabled && !isFirstRun && (
         <Alert variant="warning" className="border-orange-500 bg-orange-50">
           <AlertTriangle className="h-4 w-4" />
           <div>

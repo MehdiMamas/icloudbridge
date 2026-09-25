@@ -1,7 +1,7 @@
 """Pydantic models for API request/response validation."""
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, EmailStr, Field
 
@@ -398,6 +398,9 @@ class ShortcutStatus(BaseModel):
     name: str
     installed: bool
     url: str
+    # Installed, but older than the version at `url`
+    update_available: bool = False
+    update_note: str | None = None
 
 
 class FullDiskAccessStatus(BaseModel):
@@ -431,6 +434,12 @@ class ServicePermissionStatus(BaseModel):
 
     permitted: bool
     missing: list[str] = Field(default_factory=list)
+
+
+class PermissionRequest(BaseModel):
+    """Ask the menubar app to show the macOS permission prompts for a service."""
+
+    service: Literal["notes", "reminders", "photos"]
 
 
 class PermissionsResponse(BaseModel):

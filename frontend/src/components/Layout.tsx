@@ -23,6 +23,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { useAppStore } from '@/store/app-store';
 import { useSyncStore } from '@/store/sync-store';
 import { useWebSocket } from '@/hooks/useWebSocket';
+import FirstRunWizard from '@/components/FirstRunWizard';
 
 export default function Layout() {
   const location = useLocation();
@@ -34,6 +35,7 @@ export default function Layout() {
     toggleSidebar,
     wsConnected,
     setWsConnected,
+    dataRevision,
   } = useAppStore();
   const { setActiveSync, clearActiveSync, addLog, addScheduleRun } = useSyncStore();
 
@@ -246,7 +248,8 @@ export default function Layout() {
 
         {/* Page Content */}
         <main className="flex-1 overflow-y-auto p-6 lg:p-8">
-          <Outlet />
+          {/* Keyed so refreshData() remounts the page and it reloads its data */}
+          <Outlet key={dataRevision} />
         </main>
       </div>
 
@@ -257,6 +260,8 @@ export default function Layout() {
           onClick={toggleSidebar}
         />
       )}
+
+      <FirstRunWizard />
     </div>
   );
 }

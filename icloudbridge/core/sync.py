@@ -15,6 +15,7 @@ from icloudbridge.sources.notes.applescript import AppleScriptNote, NotesAdapter
 from icloudbridge.sources.notes.markdown import MarkdownAdapter, MarkdownNote
 from icloudbridge.sources.notes.shortcuts import NotesShortcutAdapter
 from icloudbridge.utils.converters import (
+    extract_hashtags,
     sanitize_filename,
     split_markdown_segments,
     strip_leading_heading,
@@ -73,6 +74,7 @@ class NotesSyncEngine:
         self.shortcut_calls: list[dict[str, str | None]] = []
         self.shortcuts = NotesShortcutAdapter(self.shortcut_calls)
         self.use_shortcut_pipeline = prefer_shortcuts
+        self._shortcut_folder_names: dict[str, str | None] = {}
         self.db = NotesDB(db_path)
         self._temp_attachment_files: set[Path] = set()
         # True while a rich_capture_scope is open; see that method.
@@ -258,6 +260,9 @@ class NotesSyncEngine:
             if len(detail_list) < DETAIL_ENTRY_LIMIT:
                 detail_list.append(title)
 
+        # Folders may have been created since the last folder was synced
+        self._shortcut_folder_names.clear()
+
         try:
             if self.notes_adapter.is_ignored_folder(folder_name):
                 raise RuntimeError(f"Folder '{folder_name}' cannot be synced (ignored by design)")
@@ -297,7 +302,16 @@ class NotesSyncEngine:
             # For now, we'll query all mappings and filter by note UUIDs
             all_mappings = await self.db.get_all_mappings()
             is_bootstrap = len(all_mappings) == 0
-            mappings_by_uuid = {m["local_uuid"]: m for m in all_mappings}
+            # A note can be mapped to files in several folders (it was moved, or an
+            # older release synced it twice). Prefer the file in this folder.
+            mappings_by_uuid = {}
+            for m in all_mappings:
+                current = mappings_by_uuid.get(m["local_uuid"])
+                if current is None or (
+                    m["remote_path"] in remote_notes_by_path
+                    and current["remote_path"] not in remote_notes_by_path
+                ):
+                    mappings_by_uuid[m["local_uuid"]] = m
             mappings_by_remote_path = {m["remote_path"]: m for m in all_mappings}
 
             # Track which notes/files we've processed (used by bootstrap reconciliation + main loops)
@@ -414,7 +428,7 @@ class NotesSyncEngine:
                     mapping = mappings_by_uuid.get(uuid)
                     if mapping:
                         remote_path_str = str(mapping["remote_path"])
-                        if remote_path_str not in remote_notes_by_path:
+                        if remote_path_str not in remote_notes_by_path and not Path(remote_path_str).exists():
                             deletion_count += 1
 
                 # Count markdown files that would be deleted (local note missing)
@@ -449,6 +463,33 @@ class NotesSyncEngine:
                     attachment_slug = mapping.get("attachment_slug") if mapping else None
                     processed_local_uuids.add(uuid)
                     processed_remote_paths.add(str(remote_path))
+
+                    # The file exists but outside this folder: the note was moved
+                    # here in Apple Notes. Move the markdown with it, never delete.
+                    if str(remote_path) not in remote_notes_by_path and remote_path.exists():
+                        if sync_mode == "import":
+                            logger.debug(f"Note moved but in import mode - keeping markdown in place: {apple_note.name}")
+                            continue
+                        if dry_run:
+                            logger.info(f"[DRY RUN] Would move markdown into {folder_name}: {apple_note.name}")
+                            stats["updated_remote"] += 1
+                            record_detail("markdown", "updated", apple_note.name)
+                            continue
+                        moved_path = await self.markdown_adapter.move_note(remote_path, markdown_subfolder)
+                        if moved_path is None:
+                            continue
+                        await self.db.delete_mapping_by_remote_path(str(remote_path))
+                        await self.db.upsert_mapping(
+                            local_uuid=uuid,
+                            local_name=mapping["local_name"],
+                            local_folder_uuid="",
+                            remote_path=moved_path,
+                            timestamp=mapping["last_sync_timestamp"],
+                            attachment_slug=attachment_slug,
+                        )
+                        remote_path = moved_path
+                        remote_notes_by_path[str(moved_path)] = await self.markdown_adapter.read_note(moved_path)
+                        processed_remote_paths.add(str(moved_path))
 
                     # Check if remote file still exists
                     if str(remote_path) not in remote_notes_by_path:
@@ -965,6 +1006,21 @@ class NotesSyncEngine:
             temp_file.unlink(missing_ok=True)
         self._temp_attachment_files.clear()
 
+    async def _shortcut_folder_name(self, folder_name: str) -> str | None:
+        """
+        The name the iCloudBridge Shortcuts can find `folder_name` by, or None.
+
+        Shortcuts look a folder up by its bare name: a nested path matches
+        nothing (the note silently lands in the default folder), and a name
+        shared by two folders stops the Shortcut on a "which one?" prompt.
+        """
+        if folder_name not in self._shortcut_folder_names:
+            name = folder_name.rsplit("/", 1)[-1]
+            folders = await self.notes_adapter.list_folders(include_unsyncable=True)
+            same_name = [f for f in folders if f.name.rsplit("/", 1)[-1] == name]
+            self._shortcut_folder_names[folder_name] = name if len(same_name) == 1 else None
+        return self._shortcut_folder_names[folder_name]
+
     async def _pull_from_remote(
         self,
         md_note: MarkdownNote,
@@ -987,6 +1043,20 @@ class NotesSyncEngine:
         prepared_note = await self.markdown_adapter.get_note_for_apple_notes(md_note.file_path)
 
         use_shortcuts = prepared_note.has_checklist or self.use_shortcut_pipeline
+        shortcut_folder = await self._shortcut_folder_name(folder_name) if use_shortcuts else None
+        if use_shortcuts and shortcut_folder is None:
+            if prepared_note.has_checklist:
+                raise RuntimeError(
+                    f"Cannot sync checklist note '{md_note.name}' into '{folder_name}': another Apple Notes "
+                    "folder has the same name, and checklists can only be written to a folder by its name. "
+                    "Rename one of the folders."
+                )
+            logger.info(
+                "Another folder is also named like '%s'; writing '%s' with AppleScript instead of Shortcuts",
+                folder_name,
+                md_note.name,
+            )
+            use_shortcuts = False
 
         if use_shortcuts:
             logger.debug(
@@ -999,7 +1069,17 @@ class NotesSyncEngine:
                 await self.notes_adapter.find_notes_by_name(folder_name, md_note.name)
             )
 
-            await self.shortcuts.upsert_note(folder_name, md_note.name)
+            source_markdown = (
+                prepared_note.markdown_with_inline_attachments or prepared_note.markdown_body
+            )
+            markdown_body = strip_leading_heading(source_markdown, md_note.name)
+            # Hashtags appended as text are not tags in Apple Notes. When the
+            # Upsert Shortcut can apply real ones, move them out of the text.
+            tags: list[str] = []
+            if self.shortcuts.supports_tags():
+                markdown_body, tags = extract_hashtags(markdown_body)
+
+            await self.shortcuts.upsert_note(shortcut_folder, md_note.name, tags)
             self.notes_adapter.clear_rich_cache()
 
             new_uuid = None
@@ -1047,19 +1127,15 @@ class NotesSyncEngine:
                 self.notes_adapter.clear_rich_cache()
 
             try:
-                source_markdown = (
-                    prepared_note.markdown_with_inline_attachments or prepared_note.markdown_body
-                )
-                markdown_body = strip_leading_heading(source_markdown, md_note.name)
                 segments = split_markdown_segments(markdown_body)
                 if not segments:
-                    await self.shortcuts.append_content(folder_name, md_note.name, markdown_body)
+                    await self.shortcuts.append_content(shortcut_folder, md_note.name, markdown_body)
                 else:
                     for segment_type, block in segments:
                         if segment_type == "checklist":
-                            await self.shortcuts.append_checklist(folder_name, md_note.name, block)
+                            await self.shortcuts.append_checklist(shortcut_folder, md_note.name, block)
                         else:
-                            await self.shortcuts.append_content(folder_name, md_note.name, block)
+                            await self.shortcuts.append_content(shortcut_folder, md_note.name, block)
             except Exception:
                 if created_by_upsert:
                     logger.warning(
@@ -1152,6 +1228,10 @@ class NotesSyncEngine:
         deletion_threshold: int,
     ) -> None:
         """Sync each mapped folder, recording per-folder stats or errors."""
+        existing_apple = {f.name for f in await self.notes_adapter.list_folders(include_unsyncable=True)}
+        default_account, accounts = await self.notes_adapter.list_accounts()
+        markdown_folders = await self.markdown_adapter.list_folders()
+
         for apple_folder, mapping_config in folder_mappings.items():
             if not mapping_config:
                 logger.info(f"Skipping excluded folder: {apple_folder}")
@@ -1165,9 +1245,39 @@ class NotesSyncEngine:
                 continue
 
             try:
-                logger.info(f"Syncing '{apple_folder}' → '{markdown_folder}' ({mode} mode)")
+                # A folder mapped from markdown may not exist in Apple Notes yet,
+                # and its mapping key carries no account ("Linux Hacks"). Its
+                # markdown subfolders need Apple folders too, as the mapping
+                # covers them.
+                apple_path = apple_folder
+                if apple_folder not in existing_apple and apple_folder.split("/", 1)[0] not in accounts:
+                    apple_path = f"{default_account}/{apple_folder}"
+                if apple_path not in existing_apple and mode == "export":
+                    raise RuntimeError(
+                        f"Apple Notes folder '{apple_folder}' does not exist, and export mode never creates it"
+                    )
+                if mode != "export":
+                    missing = [
+                        path
+                        for path in [apple_path] + [
+                            f"{apple_path}/{md[len(markdown_folder) + 1:]}"
+                            for md in markdown_folders
+                            if md.startswith(f"{markdown_folder}/")
+                        ]
+                        if path not in existing_apple
+                    ]
+                    if missing and dry_run:
+                        logger.info(f"[DRY RUN] Would create Apple Notes folders: {', '.join(missing)}")
+                        if apple_path in missing:
+                            continue
+                    elif missing:
+                        for path in missing:
+                            await self.notes_adapter.create_folder(path)
+                            existing_apple.add(path)
+
+                logger.info(f"Syncing '{apple_path}' → '{markdown_folder}' ({mode} mode)")
                 stats = await self.sync_folder(
-                    folder_name=apple_folder,
+                    folder_name=apple_path,
                     markdown_subfolder=markdown_folder,
                     dry_run=dry_run,
                     skip_deletions=skip_deletions,
@@ -1182,9 +1292,9 @@ class NotesSyncEngine:
                 for folder in all_apple_folders:
                     folder_path = folder.name
                     # Check if this is a subfolder of the current mapped folder
-                    if folder_path.startswith(f"{apple_folder}/"):
+                    if folder_path.startswith(f"{apple_path}/"):
                         # Calculate the corresponding markdown subfolder
-                        relative_path = folder_path[len(apple_folder) + 1:]  # +1 for the "/"
+                        relative_path = folder_path[len(apple_path) + 1:]  # +1 for the "/"
                         markdown_subfolder = f"{markdown_folder}/{relative_path}"
 
                         logger.info(f"Syncing nested folder '{folder_path}' → '{markdown_subfolder}' ({mode} mode)")

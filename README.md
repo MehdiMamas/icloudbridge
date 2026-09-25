@@ -10,9 +10,9 @@ A small window into Apple's walled garden. Keep your Apple Notes, Reminders, Pas
 
 ## Features
 
-- 🗒️ Apple Notes can be synced with a folder containing Markdown files. If using Nextcloud, this can then be synced to your instance and used via the Nextcloud Notes app. Supports images, URLs, attachments, folders and checkboxes (TODO items).
+- 🗒️ Apple Notes can be synced with a folder containing Markdown files. If using Nextcloud, this can then be synced to your instance and used via the Nextcloud Notes app. Supports images, URLs, attachments, folders, tags and checkboxes (TODO items).
 
-- 📋 Apple Reminders can be synced with a CalDAV server, such as the one provided by Nextcloud. Supports due dates, notes, folders, recurring reminders & completion status.
+- 📋 Apple Reminders can be synced with a CalDAV server, such as the one provided by Nextcloud. Supports due dates, alerts, priorities, URLs, notes, folders, recurring reminders & completion status.
 
 - 📸 Apple Photos sync. This one is quite specific to Nextcloud. When the Nextcloud app is installed on iOS, it can automatically upload photos to Nextcloud - however - it is a one-way sync. Photos added on Nextcloud are not synced back to your Apple Photos library. iCloudBridge fixes this by downloading new photos from Nextcloud and adding them to Apple Photos. **Bidirectional sync** is also supported - export photos from Apple Photos (including shared family libraries) back to Nextcloud.
 
@@ -22,7 +22,7 @@ A small window into Apple's walled garden. Keep your Apple Notes, Reminders, Pas
 
 - iCloudBridge requires a macOS machine to run on. The machine does not need to be always on, but the syncs will only run when it is powered on (duh!). A macOS VM is also possible, but not officially supported.
 
-- Apple Notes: Whilst TODO items are supported, there is a limitation that when a todo item is checked (i.e. marked as completed), iCloudBridge cannot directly update the note to reflect this (this is currently not possible - believe me, I've tried). Instead, iCloudBridge will prepend a ✅ to the start of the line. This is not ideal, but is the best that can be done for now. Sub-folders are also only partially supported at this time, but this may be improved in future.
+- Apple Notes: Checklists are supported, but a ticked item in your markdown can't be ticked in Apple Notes, because Apple provides no way to do it. Instead, iCloudBridge adds ✅ to the start of the line and leaves the item unticked. Sub-folders are supported, with one exception: a note with a checklist can't be synced into a folder that has the same name as another folder (for example `Work/Archive` and `Personal/Archive`). Rename one of the folders to sync it.
 
 - Apple Photos: Sync is additive only - deletions or modifications are not synced. When importing, photos always go to your personal library (not shared library) - this is an Apple limitation. When exporting, the default "going forward" mode only exports new photos added after enabling export.
 
@@ -35,7 +35,7 @@ Grab the latest release, then double-click!
 ## Usage
 
 ### WebUI
-iCloudBridge features a web-based GUI. After launching the app, click on the menubar icon and select "Open WebUI". For documentation on how to use the WebUI, see the [User Guide](docs/user.md).
+iCloudBridge features a web-based GUI. After launching the app, click on the menubar icon and select "Open Web UI". For documentation on how to use the WebUI, see the [User Guide](docs/user.md).
 
 ### Command Line
 iCloudBridge can also be run from the command line. For documentation on how to use the command line interface, see the [Usage](docs/USAGE.md) guide.
@@ -46,11 +46,11 @@ iCloudBridge is a one-man show - I basically built this to scratch my own itch. 
 
 ### Tech Stack
 
-- **Backend**: Python 3.11+ with FastAPI, packaged with PyInstaller
+- **Backend**: Python 3.11+ with FastAPI. The app ships the backend source and runs it in its own Python environment, built from Homebrew's `python@3.12`
 - **Frontend**: React + TypeScript with Vite, TailwindCSS, and shadcn/ui components
 - **Desktop App**: Swift-based macOS menubar app
 - **Build Tool**: Just command runner for task automation
-- **Apple Integration**: PyObjC for Notes/Reminders, AppleScript for Photos, native Shortcuts for Passwords
+- **Apple Integration**: AppleScript, Shortcuts and Apple Cloud Notes Parser (Ruby) for Notes; PyObjC (EventKit) for Reminders; AppleScript and PhotoKit (via the menubar app) for Photos; CSV import/export for Passwords
 
 ### Prerequisites
 
@@ -60,13 +60,13 @@ Before you begin, ensure you have:
 - **Xcode Command Line Tools**: Install with `xcode-select --install`
 - **Python >= 3.11**: `brew install python3`
 - **Poetry**: Python dependency management - `pipx install poetry`
-- **Node.js 18+**: `brew install node`
-- **Ruby >= 3.0**: For Notes Ripper - `brew install ruby`
+- **Node.js 20.19+**: `brew install node`
+- **Ruby >= 3.4**: For Notes Ripper - `brew install ruby`
 - **Just**: Command runner - `brew install just`
 
 Quick install (Homebrew):
 ```bash
-brew install python3 node just ruby
+brew install python3 node just ruby pipx
 pipx install poetry
 just install
 ```
@@ -83,11 +83,8 @@ just install
 2. **Install dependencies**
 
    ```bash
-   # Install backend dependencies
+   # Install backend, frontend and Notes Ripper dependencies
    just install
-
-   # Install frontend dependencies
-   npm --prefix frontend install
    ```
 
 3. **Run the development environment**
@@ -108,11 +105,11 @@ just install
 
    Navigate to `http://localhost:3000` in your browser to see the WebUI.
 
-4. **Optional: Activate Poetry shell**
+4. **Optional: Activate the Poetry environment**
 
    For running ad-hoc commands or debugging:
    ```bash
-   poetry shell
+   eval $(poetry env activate)
    ```
 
 ### Development Workflow
@@ -140,7 +137,7 @@ iCloudBridge offers several build configurations:
 ```bash
 just build-debug
 ```
-Output: `build/Debug/iCloudBridge.app`
+Output: `build/Release/iCloudBridge.app`
 
 **Production Build (Developer ID signed, no DMG)**:
 ```bash
@@ -148,17 +145,13 @@ just build
 ```
 Output: `build/Release/iCloudBridge.app`
 
+Both builds write to the same folder, so each one replaces the other.
+
 **Full Release (signed + notarized DMG)**:
 ```bash
 just release
 ```
-Output: `dist/iCloudBridge.dmg`
-
-**Backend Only (PyInstaller)**:
-```bash
-just build-backend
-```
-Output: `dist/icloudbridge-backend`
+Output: `build/Release/iCloudBridge.dmg`
 
 #### Cleaning Build Artifacts
 
@@ -180,10 +173,11 @@ Validates code signature and Gatekeeper acceptance.
 ```
 icloudbridge/
 ├── icloudbridge/          # Python backend source
-│   ├── api/              # FastAPI routes
-│   ├── services/         # Sync logic (notes, reminders, photos, passwords)
-│   ├── models/           # Pydantic models
-│   └── utils/            # Helpers and utilities
+│   ├── api/              # FastAPI routes, WebSocket and scheduler
+│   ├── cli/              # Command-line interface
+│   ├── core/             # Sync engines (notes, reminders, photos, passwords)
+│   ├── sources/          # Adapters for Apple apps and remote services
+│   └── utils/            # Databases, credentials, converters and other helpers
 ├── frontend/             # React frontend
 │   ├── src/
 │   │   ├── components/   # React components
@@ -194,6 +188,8 @@ icloudbridge/
 │   └── public/           # Static assets
 ├── macos/                # macOS menubar app
 │   └── MenubarApp/       # Swift menubar application
+├── tools/                # Notes Ripper (Ruby) and Notes database copy helper
+├── tests/                # pytest suite
 ├── scripts/              # Build and automation scripts
 ├── docs/                 # User documentation
 ├── justfile              # Task runner configuration
@@ -202,11 +198,12 @@ icloudbridge/
 
 ### Key Components
 
-**Backend Services**:
-- `notes.py` - Apple Notes sync using PyObjC
-- `reminders.py` - CalDAV sync for Apple Reminders
-- `photos.py` - Photo library sync via AppleScript
-- `passwords.py` - Password sync using Shortcuts automation
+**Sync Engines** (`icloudbridge/core/`):
+- `sync.py` - Apple Notes ↔ Markdown, using AppleScript, Shortcuts and the Notes Ripper
+- `reminders_sync.py` - Apple Reminders ↔ CalDAV, using EventKit
+- `photos_sync.py` - Imports photos into Apple Photos using AppleScript
+- `photos_export_engine.py` - Exports photos from the Photos library, fetching iCloud-only photos through PhotoKit
+- `passwords_sync.py` - Apple Passwords ↔ Bitwarden/Vaultwarden/Nextcloud Passwords, via CSV
 
 **Frontend Pages**:
 - Dashboard, Notes, Reminders, Photos, Passwords, Schedules, Logs, Settings
@@ -239,9 +236,9 @@ icloudbridge/
 
 For maintainers creating a release:
 
-1. Update version in `pyproject.toml` and `frontend/src/components/Layout.tsx`
+1. Update the version in `pyproject.toml` and the frontend (`npm --prefix frontend version <x.y.z> --no-git-tag-version`), and move the `changelog.md` entries under a heading for the new version
 2. Build and notarize: `just release`
-3. Create GitHub release with `dist/iCloudBridge.dmg`
+3. Create GitHub release with `build/Release/iCloudBridge.dmg`
 4. Update documentation site if needed
 
 ## Acknowledgements

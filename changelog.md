@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0] - 2026-09-25
+
+### Fixed
+- Notes shown in a Smart Folder were being deleted. iCloudBridge treated Smart Folders as ordinary folders, so a note appeared to live in two places at once, and the sync decided one copy had been removed and deleted it. Putting the notes back only got them deleted again. Smart Folders are now skipped: they aren't synced and can't be chosen as a folder to map. If you already have a mapping for one, the sync tells you to remove it. Thanks to @r0ll3r for reporting this (#18).
+- Moving a note from one synced folder to another could delete it and recreate it in the folder you moved it out of, losing its formatting. Whether this happened depended only on the order the folders were synced in. The markdown copy now moves with the note.
+- A markdown file that couldn't be read no longer causes its Apple note to be deleted.
+- Folders that exist only in your markdown folder (for example on Nextcloud) are now created in Apple Notes when you map them, along with their subfolders. The settings page already said they would be, but the sync failed with "Folder not found" instead. A mapping set to export only can't create a folder, and now says so.
+- Notes arriving from your markdown folder into a subfolder in Apple Notes were placed in the main Notes folder instead, and a new copy appeared there on every sync. They now go to the right folder. The one exception is a note with a checklist going into a folder that shares its name with another folder: it can't be placed reliably, so the sync asks you to rename one of the folders.
+- Notes containing code, such as a Python script, could fail to sync with "The index you specified was outside the possible range". They now sync normally.
+- Tags were lost when a note was edited in your markdown folder and synced back to Apple Notes. The text of the tag came back, but not the tag itself, so the note dropped out of any Smart Folder that used it. With the updated Create Note shortcut, synced notes keep their tags. The tags sit at the top of the note, below the title, so a tag written in the middle of a sentence moves there after the first sync.
+- "Recently Deleted" was offered as a folder you could sync, and iCloudBridge could never tell whether a note was sitting in it. Both now work, including on Macs set to other languages.
+- The setup window didn't open on first launch if Homebrew, Python and Ruby were already installed. Permission prompts then appeared later, in the middle of using the web interface. The window now opens on first launch, asks for access to Notes and Photos, and doesn't show a prompt unless you click a button.
+- The setup window disappeared as soon as you granted a permission or clicked outside it. It now stays open until you close it. While it's open, iCloudBridge appears in the Dock and the app switcher, and the window comes back to the front after each macOS prompt.
+- "Quit & Reopen" after granting Full Disk Access quit iCloudBridge but never reopened it. The app was ending itself abruptly on every quit, so macOS didn't treat it as a normal quit. It now quits cleanly and reopens as expected.
+- The first-run wizard showed the Notes page behind it, and a "Notes Setup Incomplete" warning stayed on screen afterwards until you refreshed. The Dashboard is now behind the wizard, and it refreshes itself when the wizard finishes.
+- After a fresh install, the first-run wizard didn't appear if your browser remembered finishing it on a previous install. Whether the wizard has been completed is now stored by iCloudBridge itself.
+- A sync couldn't be switched off while one of its permissions was missing. Missing permissions now only stop you switching a sync on.
+- Reminders access that only allowed adding reminders counted as granted, even though iCloudBridge needs to read them too. It now asks for full access, and says so if only partial access was given.
+
+### Changed
+- Photos sync now also needs permission to control the Photos app, which it uses behind the scenes but never asked for. Photos sync can't be switched on until it's granted.
+- Missing permissions can now be granted from the web interface. Where a sync is blocked, a "Grant access" button shows the macOS prompts and updates the page once you've answered, with no restart needed.
+- The setup window marks which permissions are required and which are optional, and what each optional one is for. Only Homebrew, the Xcode Command Line Tools, Python and Ruby are required; everything else depends on which syncs you use.
+- The Create Note shortcut has been updated so that synced notes keep their tags. The web interface offers the update where it lists the shortcuts, and on the Notes page.
+
+### Removed
+- iCloudBridge no longer asks for Accessibility permission. Nothing ever used it.
+- iCloudBridge no longer asks to control System Events.
+- For developers: `just build-backend` is gone. It built a standalone backend with PyInstaller, which the app never used, because the app runs the backend in its own Python environment.
+
+### Added
+- For developers: `just nuke` removes iCloudBridge completely (the app, its data and settings, its Keychain items and its macOS permissions), then builds and installs a fresh debug copy for testing a first run.
+
 ## [0.2.8] - 2026-09-06
 
 ### Fixed

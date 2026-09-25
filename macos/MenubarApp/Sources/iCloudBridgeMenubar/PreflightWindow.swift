@@ -17,7 +17,17 @@ final class PreflightModel: ObservableObject {
     }
 }
 
-final class PreflightWindowController: NSWindowController {
+/// The setup window.
+///
+/// iCloudBridge normally runs as an accessory app, with no Dock icon and no
+/// Cmd-Tab entry. That suits the menu bar, but it left this window with no way
+/// back once it lost focus: clicking another app, or a macOS permission prompt
+/// or System Settings coming forward, buried it behind other windows, where it
+/// looked as if it had been dismissed. While the window is open the app is a
+/// regular one, so it stays reachable from the Dock and the app switcher. The
+/// window keeps the normal level on purpose; floating it would cover System
+/// Settings while the user is granting access there.
+final class PreflightWindowController: NSWindowController, NSWindowDelegate {
     private let model = PreflightModel(snapshot: PreflightSnapshot(statuses: [], suppressNext: true, allSatisfied: false, progress: [:], logs: [:]))
     private let hostingController: NSHostingController<PreflightView>
 
@@ -36,9 +46,6 @@ final class PreflightWindowController: NSWindowController {
     var onOpenFullDiskAccess: (() -> Void)? {
         didSet { setCallbacks() }
     }
-    var onOpenAccessibility: (() -> Void)? {
-        didSet { setCallbacks() }
-    }
     var onOpenNotesAutomation: (() -> Void)? {
         didSet { setCallbacks() }
     }
@@ -48,9 +55,14 @@ final class PreflightWindowController: NSWindowController {
     var onOpenPhotosAutomation: (() -> Void)? {
         didSet { setCallbacks() }
     }
+    var onOpenPhotosAppAutomation: (() -> Void)? {
+        didSet { setCallbacks() }
+    }
     var onRefresh: (() -> Void)? {
         didSet { setCallbacks() }
     }
+    /// Called when the window regains focus, e.g. on returning from System Settings.
+    var onBecameKey: (() -> Void)?
     var onCloseRequested: (() -> Void)? {
         didSet { setCallbacks() }
     }
@@ -71,6 +83,7 @@ final class PreflightWindowController: NSWindowController {
         window.contentViewController = hostingController
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        window.delegate = self
     }
 
     required init?(coder: NSCoder) {
@@ -81,16 +94,46 @@ final class PreflightWindowController: NSWindowController {
         model.snapshot = snapshot
     }
 
+    /// Show the window in front and make iCloudBridge the active app.
+    func present() {
+        NSApp.setActivationPolicy(.regular)
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
+        // Since macOS 14 another app can decline to hand over focus, so don't
+        // rely on activation alone to bring the window forward.
+        window?.orderFrontRegardless()
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    /// Return to the window after something else took focus. Does nothing if
+    /// the user closed or minimised it in the meantime.
+    func bringToFront() {
+        guard window?.isVisible == true else { return }
+        present()
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        onBecameKey?()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+    }
+
     private func setCallbacks() {
         hostingController.rootView.onInstallHomebrew = onInstallHomebrew
         hostingController.rootView.onInstallXcodeCLT = onInstallXcodeCLT
         hostingController.rootView.onInstallPython = onInstallPython
         hostingController.rootView.onInstallRuby = onInstallRuby
         hostingController.rootView.onOpenFullDiskAccess = onOpenFullDiskAccess
-        hostingController.rootView.onOpenAccessibility = onOpenAccessibility
         hostingController.rootView.onOpenNotesAutomation = onOpenNotesAutomation
         hostingController.rootView.onOpenRemindersAutomation = onOpenRemindersAutomation
         hostingController.rootView.onOpenPhotosAutomation = onOpenPhotosAutomation
+        hostingController.rootView.onOpenPhotosAppAutomation = onOpenPhotosAppAutomation
         hostingController.rootView.onRefresh = onRefresh
         hostingController.rootView.onCloseRequested = onCloseRequested
         hostingController.rootView.onToggleSuppress = onToggleSuppress
@@ -105,10 +148,10 @@ struct PreflightView: View {
     var onInstallPython: (() -> Void)?
     var onInstallRuby: (() -> Void)?
     var onOpenFullDiskAccess: (() -> Void)?
-    var onOpenAccessibility: (() -> Void)?
     var onOpenNotesAutomation: (() -> Void)?
     var onOpenRemindersAutomation: (() -> Void)?
     var onOpenPhotosAutomation: (() -> Void)?
+    var onOpenPhotosAppAutomation: (() -> Void)?
     var onRefresh: (() -> Void)?
     var onCloseRequested: (() -> Void)?
     var onToggleSuppress: ((Bool) -> Void)?
@@ -118,12 +161,18 @@ struct PreflightView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Confirm the prerequisites below before starting the sync engine.")
-                    .font(.system(size: 14, weight: .semibold))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Confirm the prerequisites below before starting the sync engine.")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("Only the Essential items are required. Each optional section is needed only for the sync feature it names, so skip any you don't plan to use. Passwords sync needs no macOS permissions.")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
                 VStack(alignment: .leading, spacing: 12) {
                     // Essential (runtimes) - these block the daemon
-                    Text("Essential").font(.headline)
+                    SectionHeader(category: .essential)
                     VStack(spacing: 8) {
                         RequirementRow(
                             title: "Homebrew",
@@ -175,13 +224,8 @@ struct PreflightView: View {
                     .cornerRadius(10)
 
                     // Notes Sync permissions (optional)
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text("Notes Sync").font(.headline)
-                        Text("Grant these to enable Apple Notes sync")
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.top, 8)
+                    SectionHeader(category: .notes)
+                        .padding(.top, 8)
                     VStack(spacing: 8) {
                         RequirementRow(
                             title: "Full Disk Access",
@@ -195,18 +239,7 @@ struct PreflightView: View {
                             action: { onOpenFullDiskAccess?() }
                         )
                         RequirementRow(
-                            title: "Accessibility",
-                            status: status(for: .accessibility),
-                            actionTitle: "Allow Accessibility control",
-                            actionEnabled: isActionEnabled(for: .accessibility),
-                            showsProgress: false,
-                            progress: nil,
-                            logURL: nil,
-                            onShowLogs: nil,
-                            action: { onOpenAccessibility?() }
-                        )
-                        RequirementRow(
-                            title: "Apple Notes",
+                            title: "Notes Automation",
                             status: status(for: .notesAutomation),
                             actionTitle: "Request Access",
                             actionEnabled: isActionEnabled(for: .notesAutomation),
@@ -222,13 +255,8 @@ struct PreflightView: View {
                     .cornerRadius(10)
 
                     // Reminders Sync permissions (optional)
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text("Reminders Sync").font(.headline)
-                        Text("Grant to enable Apple Reminders sync")
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.top, 8)
+                    SectionHeader(category: .reminders)
+                        .padding(.top, 8)
                     VStack(spacing: 8) {
                         RequirementRow(
                             title: "Apple Reminders",
@@ -247,16 +275,11 @@ struct PreflightView: View {
                     .cornerRadius(10)
 
                     // Photos Sync permissions (optional)
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text("Photos Sync").font(.headline)
-                        Text("Grant to enable Apple Photos sync")
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.top, 8)
+                    SectionHeader(category: .photos)
+                        .padding(.top, 8)
                     VStack(spacing: 8) {
                         RequirementRow(
-                            title: "Apple Photos",
+                            title: "Photos Library",
                             status: status(for: .photosAutomation),
                             actionTitle: "Request Access",
                             actionEnabled: isActionEnabled(for: .photosAutomation),
@@ -265,6 +288,17 @@ struct PreflightView: View {
                             logURL: nil,
                             onShowLogs: nil,
                             action: { onOpenPhotosAutomation?() }
+                        )
+                        RequirementRow(
+                            title: "Photos Automation",
+                            status: status(for: .photosAppAutomation),
+                            actionTitle: "Request Access",
+                            actionEnabled: isActionEnabled(for: .photosAppAutomation),
+                            showsProgress: false,
+                            progress: nil,
+                            logURL: nil,
+                            onShowLogs: nil,
+                            action: { onOpenPhotosAppAutomation?() }
                         )
                     }
                     .padding(12)
@@ -338,7 +372,7 @@ struct PreflightView: View {
             .filter { $0.requirement.isEssential }
             .allSatisfy { $0.state.isSatisfied }
         if essentialsReady {
-            return "Sync engine started. Service-specific permissions can be granted later as needed."
+            return "Sync engine started. Optional permissions can be granted later from Show Initial Setup in the menu bar."
         }
         return "The sync engine will start automatically when the essential prerequisites are met."
     }
@@ -390,6 +424,28 @@ struct PreflightView: View {
             return "Retry"
         default:
             return defaultTitle
+        }
+    }
+}
+
+/// Section title with a Required/Optional badge and what the section is for.
+private struct SectionHeader: View {
+    let category: RequirementCategory
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(category.title).font(.headline)
+            Text(category.isOptional ? "Optional" : "Required")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(category.isOptional ? .secondary : .accentColor)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(
+                    Capsule().fill(category.isOptional ? Color.secondary.opacity(0.15) : Color.accentColor.opacity(0.15))
+                )
+            Text(category.subtitle)
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
         }
     }
 }
