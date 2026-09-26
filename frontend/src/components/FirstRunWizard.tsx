@@ -21,6 +21,7 @@ import { FolderBrowserDialog } from '@/components/FolderBrowserDialog';
 import { FIRST_RUN_COMPLETED_SETTING, useAppStore } from '@/store/app-store';
 import { useSyncStore } from '@/store/sync-store';
 import apiClient from '@/lib/api-client';
+import { nextcloudCaldavUrl, noAutofill } from '@/lib/utils';
 import MissingPermissionsAlert from '@/components/MissingPermissionsAlert';
 import type { AppConfig, ConnectionTestResponse, SetupVerificationResponse, PermissionsResponse } from '@/types/api';
 
@@ -204,8 +205,7 @@ export default function FirstRunWizard() {
       configUpdate.reminders_caldav_username = formData.reminders_caldav_username;
       configUpdate.reminders_caldav_password = formData.reminders_caldav_password;
       configUpdate.reminders_caldav_ssl_verify_cert = formData.reminders_caldav_ssl_verify_cert;
-      configUpdate.reminders_use_nextcloud = formData.reminders_use_nextcloud;
-      configUpdate.reminders_nextcloud_url = formData.reminders_nextcloud_url;
+      // Nextcloud mode and URL are not sent: the backend reads both off the CalDAV URL
     } else {
       configUpdate.reminders_enabled = false;
     }
@@ -941,10 +941,13 @@ export default function FirstRunWizard() {
                   checked={formData.reminders_use_nextcloud ?? true}
                   onChange={(e) => {
                     const useNextcloud = e.target.checked;
+                    // Unticking keeps the URL so it can be edited
                     setFormData({
                       ...formData,
                       reminders_use_nextcloud: useNextcloud,
-                      reminders_caldav_url: '',
+                      ...(useNextcloud && {
+                        reminders_caldav_url: nextcloudCaldavUrl(formData.reminders_nextcloud_url),
+                      }),
                     });
                   }}
                   disabled={!formData.reminders_enabled}
@@ -965,11 +968,10 @@ export default function FirstRunWizard() {
                     value={formData.reminders_nextcloud_url || ''}
                     onChange={(e) => {
                       const nextcloudUrl = e.target.value;
-                      const caldavUrl = nextcloudUrl ? `${nextcloudUrl.replace(/\/$/, '')}/remote.php/dav` : '';
                       setFormData({
                         ...formData,
                         reminders_nextcloud_url: nextcloudUrl,
-                        reminders_caldav_url: caldavUrl,
+                        reminders_caldav_url: nextcloudCaldavUrl(nextcloudUrl),
                       });
                     }}
                     disabled={!formData.reminders_enabled}
@@ -981,6 +983,7 @@ export default function FirstRunWizard() {
                 <Label htmlFor="caldav-username">Username</Label>
                 <Input
                   id="caldav-username"
+                  {...noAutofill}
                   placeholder="username"
                   value={formData.reminders_caldav_username || ''}
                   onChange={(e) =>
@@ -998,6 +1001,8 @@ export default function FirstRunWizard() {
                 <Input
                   id="caldav-password"
                   type="password"
+                  {...noAutofill}
+                  autoComplete="new-password"
                   placeholder="Password"
                   value={formData.reminders_caldav_password || ''}
                   onChange={(e) =>
@@ -1148,6 +1153,7 @@ export default function FirstRunWizard() {
                     <Label htmlFor="wizard-nc-username">Nextcloud Username</Label>
                     <Input
                       id="wizard-nc-username"
+                      {...noAutofill}
                       placeholder="nextcloud-user"
                       value={formData.passwords_nextcloud_username || ''}
                       onChange={(e) =>
@@ -1161,6 +1167,8 @@ export default function FirstRunWizard() {
                     <Input
                       id="wizard-nc-password"
                       type="password"
+                      {...noAutofill}
+                      autoComplete="new-password"
                       placeholder="App password"
                       value={formData.passwords_nextcloud_app_password || ''}
                       onChange={(e) =>
@@ -1224,6 +1232,7 @@ export default function FirstRunWizard() {
                     <Label htmlFor="wizard-vw-email">Bitwarden/Vaultwarden Email</Label>
                     <Input
                       id="wizard-vw-email"
+                      {...noAutofill}
                       type="email"
                       placeholder="your@email.com"
                       value={formData.passwords_vaultwarden_email || ''}
@@ -1238,6 +1247,8 @@ export default function FirstRunWizard() {
                     <Input
                       id="wizard-vw-password"
                       type="password"
+                      {...noAutofill}
+                      autoComplete="new-password"
                       placeholder="Master password"
                       value={formData.passwords_vaultwarden_password || ''}
                       onChange={(e) =>
@@ -1252,6 +1263,7 @@ export default function FirstRunWizard() {
                     </Label>
                     <Input
                       id="wizard-vw-client-id"
+                      {...noAutofill}
                       name="passwords_vaultwarden_client_id"
                       value={formData.passwords_vaultwarden_client_id || ''}
                       onChange={(e) =>
@@ -1272,6 +1284,7 @@ export default function FirstRunWizard() {
                     </Label>
                     <Input
                       id="wizard-vw-client-secret"
+                      {...noAutofill}
                       name="passwords_vaultwarden_client_secret"
                       type="password"
                       value={formData.passwords_vaultwarden_client_secret || ''}

@@ -57,6 +57,7 @@ export interface AppConfig {
   reminders_caldav_url?: string;
   reminders_caldav_username?: string;
   reminders_caldav_password?: string;
+  reminders_caldav_password_set?: boolean;
   reminders_caldav_ssl_verify_cert?: boolean | string;
   reminders_calendar_mappings?: Record<string, string>;
   reminders_use_nextcloud?: boolean;

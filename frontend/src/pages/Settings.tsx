@@ -14,6 +14,7 @@ import { FolderBrowserDialog } from '@/components/FolderBrowserDialog';
 import { useAppStore } from '@/store/app-store';
 import { useSyncStore } from '@/store/sync-store';
 import apiClient from '@/lib/api-client';
+import { nextcloudCaldavUrl, noAutofill } from '@/lib/utils';
 import MissingPermissionsAlert from '@/components/MissingPermissionsAlert';
 import type { AppConfig, PasswordsStatus, SetupVerificationResponse, PermissionsResponse } from '@/types/api';
 
@@ -30,7 +31,10 @@ const TRANSIENT_KEYS = new Set([
   'passwords_vaultwarden_client_secret',
   'passwords_nextcloud_app_password',
   'notifications_smtp_password',
-  'notifications_smtp_password_set'
+  'notifications_smtp_password_set',
+  'reminders_caldav_password_set',
+  // Read off the CalDAV URL, so toggling it alone changes nothing on save
+  'reminders_use_nextcloud'
 ]);
 
 const stripTransientFields = (value: unknown): unknown => {
@@ -1084,10 +1088,14 @@ export default function Settings() {
                   checked={formData.reminders_use_nextcloud ?? true}
                   onChange={(e) => {
                     const useNextcloud = e.target.checked;
+                    // Unticking keeps the URL so it can be edited; clearing it
+                    // would break sync if saved without retyping it.
                     setFormData({
                       ...formData,
                       reminders_use_nextcloud: useNextcloud,
-                      reminders_caldav_url: '',
+                      ...(useNextcloud && {
+                        reminders_caldav_url: nextcloudCaldavUrl(formData.reminders_nextcloud_url),
+                      }),
                     });
                   }}
                   className="h-4 w-4 rounded border-gray-300"
@@ -1107,11 +1115,10 @@ export default function Settings() {
                     value={formData.reminders_nextcloud_url || ''}
                     onChange={(e) => {
                       const nextcloudUrl = e.target.value;
-                      const caldavUrl = nextcloudUrl ? `${nextcloudUrl.replace(/\/$/, '')}/remote.php/dav` : '';
                       setFormData({
                         ...formData,
                         reminders_nextcloud_url: nextcloudUrl,
-                        reminders_caldav_url: caldavUrl,
+                        reminders_caldav_url: nextcloudCaldavUrl(nextcloudUrl),
                       });
                     }}
                   />
@@ -1123,6 +1130,7 @@ export default function Settings() {
                 <Input
                   id="caldav-username"
                   placeholder="username"
+                  {...noAutofill}
                   value={formData.reminders_caldav_username || ''}
                   onChange={(e) =>
                     setFormData({
@@ -1138,7 +1146,15 @@ export default function Settings() {
                 <Input
                   id="caldav-password"
                   type="password"
-                  placeholder="Password"
+                  // The keychain entry belongs to the saved username
+                  placeholder={
+                    config?.reminders_caldav_password_set &&
+                    formData.reminders_caldav_username === config.reminders_caldav_username
+                      ? 'Stored in keychain - leave blank to keep'
+                      : 'Password'
+                  }
+                  {...noAutofill}
+                  autoComplete="new-password"
                   value={formData.reminders_caldav_password || ''}
                   onChange={(e) =>
                     setFormData({
@@ -1313,6 +1329,7 @@ export default function Settings() {
                 <Label htmlFor="nc-username">Nextcloud Username</Label>
                 <Input
                   id="nc-username"
+                  {...noAutofill}
                   placeholder="nextcloud-user"
                   value={formData.passwords_nextcloud_username || ''}
                   onChange={(e) =>
@@ -1326,6 +1343,8 @@ export default function Settings() {
                 <Input
                   id="nc-password"
                   type="password"
+                  {...noAutofill}
+                  autoComplete="new-password"
                   placeholder="App password"
                   value={formData.passwords_nextcloud_app_password || ''}
                   onChange={(e) =>
@@ -1419,6 +1438,7 @@ export default function Settings() {
                 <Label htmlFor="vw-email">Bitwarden/Vaultwarden Email</Label>
                 <Input
                   id="vw-email"
+                  {...noAutofill}
                   type="email"
                   placeholder="your@email.com"
                   value={formData.passwords_vaultwarden_email || ''}
@@ -1433,6 +1453,8 @@ export default function Settings() {
                 <Input
                   id="vw-password"
                   type="password"
+                  {...noAutofill}
+                  autoComplete="new-password"
                   placeholder="Your master password"
                   value={formData.passwords_vaultwarden_password || ''}
                   onChange={(e) =>
@@ -1447,6 +1469,7 @@ export default function Settings() {
                 </Label>
                 <Input
                   id="vw-client-id"
+                  {...noAutofill}
                   value={formData.passwords_vaultwarden_client_id || ''}
                   onChange={(e) =>
                     setFormData({ ...formData, passwords_vaultwarden_client_id: e.target.value })
@@ -1467,6 +1490,8 @@ export default function Settings() {
                 <Input
                   id="vw-client-secret"
                   type="password"
+                  {...noAutofill}
+                  autoComplete="new-password"
                   value={formData.passwords_vaultwarden_client_secret || ''}
                   onChange={(e) =>
                     setFormData({ ...formData, passwords_vaultwarden_client_secret: e.target.value })
@@ -1833,6 +1858,7 @@ export default function Settings() {
                 <Label htmlFor="smtp-username">Username</Label>
                 <Input
                   id="smtp-username"
+                  {...noAutofill}
                   placeholder="alerts@example.com"
                   value={formData.notifications_smtp_username || ''}
                   onChange={(e) =>
@@ -1845,6 +1871,8 @@ export default function Settings() {
                 <Input
                   id="smtp-password"
                   type="password"
+                  {...noAutofill}
+                  autoComplete="new-password"
                   placeholder={
                     config?.notifications_smtp_password_set
                       ? 'Stored in keychain - leave blank to keep'

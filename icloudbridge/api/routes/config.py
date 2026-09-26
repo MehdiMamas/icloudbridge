@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+NEXTCLOUD_CALDAV_PATH = "/remote.php/dav"
+
 
 def _serialize_folder_mappings(mappings: dict[str, FolderMapping]) -> dict[str, dict[str, str]]:
     """Convert FolderMapping objects into primitive dicts for responses."""
@@ -64,17 +66,35 @@ def _serialize_notifications(config) -> dict:
     }
 
 
-@router.get("", response_model=ConfigResponse)
-async def get_config(config: ConfigDep):
-    """Get current configuration.
+def _serialize_reminders_server(config) -> dict:
+    """Reminders server fields for a config response. Never includes the password.
 
-    Returns the current configuration without sensitive data (passwords).
+    Whether the server is Nextcloud is not stored. It is read off the CalDAV
+    URL, which the Nextcloud form always builds as <nextcloud url>/remote.php/dav.
     """
-    # Derive Nextcloud URL from CalDAV URL if it follows the Nextcloud pattern
-    reminders_nextcloud_url = None
-    if config.reminders.caldav_url and "/remote.php/dav" in config.reminders.caldav_url:
-        reminders_nextcloud_url = config.reminders.caldav_url.replace("/remote.php/dav", "").rstrip("/")
+    reminders = config.reminders
+    caldav_url = (reminders.caldav_url or "").rstrip("/")
+    use_nextcloud = not caldav_url or caldav_url.endswith(NEXTCLOUD_CALDAV_PATH)
+    nextcloud_url = caldav_url.removesuffix(NEXTCLOUD_CALDAV_PATH) if caldav_url and use_nextcloud else None
 
+    password_set = False
+    if reminders.caldav_username:
+        try:
+            password_set = CredentialStore().has_caldav_password(reminders.caldav_username)
+        except Exception as e:  # pragma: no cover - keyring unavailable
+            logger.warning(f"Could not check for a stored CalDAV password: {e}")
+
+    return {
+        "reminders_caldav_url": reminders.caldav_url,
+        "reminders_caldav_username": reminders.caldav_username,
+        "reminders_caldav_password_set": password_set,
+        "reminders_use_nextcloud": use_nextcloud,
+        "reminders_nextcloud_url": nextcloud_url,
+    }
+
+
+def _config_response(config) -> ConfigResponse:
+    """Build the response shared by reading and saving the configuration."""
     return ConfigResponse(
         data_dir=str(config.general.data_dir),
         config_file=str(config.default_config_path) if config.default_config_path else None,
@@ -84,9 +104,6 @@ async def get_config(config: ConfigDep):
         photos_enabled=config.photos.enabled,
         notes_remote_folder=str(config.notes.remote_folder) if config.notes.remote_folder else None,
         notes_folder_mappings=_serialize_folder_mappings(config.notes.folder_mappings),
-        reminders_caldav_url=config.reminders.caldav_url,
-        reminders_caldav_username=config.reminders.caldav_username,
-        reminders_nextcloud_url=reminders_nextcloud_url,
         reminders_sync_mode=config.reminders.sync_mode,
         reminders_calendar_mappings=config.reminders.calendar_mappings or {},
         reminders_caldav_ssl_verify_cert=config.reminders.caldav_ssl_verify_cert,
@@ -103,8 +120,18 @@ async def get_config(config: ConfigDep):
         photos_export_mode=config.photos.export_mode,
         photos_export_folder=str(config.photos.export.export_folder) if config.photos.export.export_folder else None,
         photos_export_organize_by=config.photos.export.organize_by,
+        **_serialize_reminders_server(config),
         **_serialize_notifications(config),
     )
+
+
+@router.get("", response_model=ConfigResponse)
+async def get_config(config: ConfigDep):
+    """Get current configuration.
+
+    Returns the current configuration without sensitive data (passwords).
+    """
+    return _config_response(config)
 
 
 @router.put("", response_model=ConfigResponse)
@@ -391,38 +418,7 @@ async def update_config(update: ConfigUpdateRequest, config: ConfigDep):
             detail=f"Failed to save configuration: {str(e)}"
         )
 
-    # Derive Nextcloud URL from CalDAV URL if it follows the Nextcloud pattern
-    reminders_nextcloud_url = None
-    if config.reminders.caldav_url and "/remote.php/dav" in config.reminders.caldav_url:
-        reminders_nextcloud_url = config.reminders.caldav_url.replace("/remote.php/dav", "").rstrip("/")
-
-    return ConfigResponse(
-        data_dir=str(config.general.data_dir),
-        config_file=str(config.default_config_path) if config.default_config_path else None,
-        notes_enabled=config.notes.enabled,
-        reminders_enabled=config.reminders.enabled,
-        passwords_enabled=config.passwords.enabled,
-        photos_enabled=config.photos.enabled,
-        notes_remote_folder=str(config.notes.remote_folder) if config.notes.remote_folder else None,
-        notes_folder_mappings=_serialize_folder_mappings(config.notes.folder_mappings),
-        reminders_caldav_url=config.reminders.caldav_url,
-        reminders_caldav_username=config.reminders.caldav_username,
-        reminders_nextcloud_url=reminders_nextcloud_url,
-        reminders_sync_mode=config.reminders.sync_mode,
-        reminders_calendar_mappings=config.reminders.calendar_mappings or {},
-        reminders_caldav_ssl_verify_cert=config.reminders.caldav_ssl_verify_cert,
-        passwords_ssl_verify_cert=config.passwords.passwords_ssl_verify_cert,
-        passwords_vaultwarden_url=config.passwords.vaultwarden_url,
-        passwords_vaultwarden_email=config.passwords.vaultwarden_email,
-        photos_default_album=config.photos.default_album,
-        photo_sources=_serialize_photo_sources(config.photos.sources),
-        # Photo sync mode and export settings
-        photos_sync_mode=config.photos.sync_mode,
-        photos_export_mode=config.photos.export_mode,
-        photos_export_folder=str(config.photos.export.export_folder) if config.photos.export.export_folder else None,
-        photos_export_organize_by=config.photos.export.organize_by,
-        **_serialize_notifications(config),
-    )
+    return _config_response(config)
 
 
 @router.post("/notifications/test")

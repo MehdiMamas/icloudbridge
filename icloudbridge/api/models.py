@@ -101,6 +101,8 @@ class ConfigResponse(BaseModel):
     notes_folder_mappings: dict[str, dict[str, str]] = Field(default_factory=dict)
     reminders_caldav_url: str | None = None
     reminders_caldav_username: str | None = None
+    reminders_caldav_password_set: bool = False
+    reminders_use_nextcloud: bool = True
     reminders_nextcloud_url: str | None = None
     reminders_sync_mode: str | None = None
     reminders_calendar_mappings: dict[str, str] = Field(default_factory=dict)
