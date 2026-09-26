@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- "Reset Reminders" didn't fully reset. It kept the lists you had chosen to sync, so a list you had since deleted came back after you set Reminders up again, even with a different, empty CalDAV account. It reappeared both in Apple Reminders and on the server. Resetting now also restores the list mappings and sync mode to their defaults. Thanks to @r0ll3r for reporting this (#19).
+- A saved mapping could bring back a list that was gone from both Apple Reminders and the CalDAV server, because the sync recreated it on both sides. The sync now skips such mappings. The Reminders page lists them, with a button to remove each one.
+- In manual mode, mapping a CalDAV calendar to a new Apple Reminders list made its row disappear from the mappings table, so you could no longer see or change it. The row now stays, with a note that the list will be created.
+
+### Changed
+- Syncing a named pair of lists with `icloudbridge reminders sync --apple-calendar … --caldav-calendar …` no longer creates both lists when neither exists. Create the list on one side first.
+
 ## [0.3.0] - 2026-09-25
 
 ### Fixed

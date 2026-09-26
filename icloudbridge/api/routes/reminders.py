@@ -7,7 +7,12 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, status
 
-from icloudbridge.api.dependencies import ConfigDep, RemindersDBDep, RemindersSyncEngineDep
+from icloudbridge.api.dependencies import (
+    ConfigDep,
+    RemindersDBDep,
+    RemindersSyncEngineDep,
+    get_config,
+)
 from icloudbridge.api.models import RemindersSyncRequest
 from icloudbridge.utils.credentials import CredentialStore
 from icloudbridge.utils.datetime_utils import safe_fromtimestamp
@@ -100,7 +105,13 @@ async def list_caldav_calendars(config: ConfigDep):
             caldav_password,
             ssl_verify_cert=config.reminders.caldav_ssl_verify_cert,
         )
-        await adapter.connect()
+        # Fail rather than return an empty list, which the UI would read as
+        # "no calendars exist" and flag every mapping as stale.
+        if not await adapter.connect():
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Could not connect to the CalDAV server."
+            )
         calendars = await adapter.list_calendars()
 
         # Return just the calendar names for autocomplete
@@ -448,9 +459,10 @@ async def get_history(
 
 @router.post("/reset")
 async def reset_database(engine: RemindersSyncEngineDep, config: ConfigDep):
-    """Reset reminders sync database, history, and keychain password.
+    """Reset reminders sync database, list settings, history, and keychain password.
 
-    Clears all reminder mappings from the database, deletes sync history,
+    Clears all reminder mappings from the database, restores the sync mode
+    and list mappings in config.toml to their defaults, deletes sync history,
     and removes CalDAV password from keychain. This will cause all reminders
     to be re-synced on the next sync operation.
 
@@ -461,6 +473,11 @@ async def reset_database(engine: RemindersSyncEngineDep, config: ConfigDep):
         # Reset reminders database
         await engine.reset_database()
         logger.info("Reminders database reset successfully")
+
+        config.reminders.reset_list_settings()
+        config.save_to_file(config.default_config_path)
+        get_config.cache_clear()
+        logger.info("Reminders list mappings and sync mode reset to defaults")
 
         # Clear sync history for reminders service
         sync_logs_db = SyncLogsDB(config.general.data_dir / "sync_logs.db")
@@ -479,7 +496,7 @@ async def reset_database(engine: RemindersSyncEngineDep, config: ConfigDep):
 
         return {
             "status": "success",
-            "message": "Reminders database, history, and keychain password reset successfully.",
+            "message": "Reminders database, list settings, history, and keychain password reset successfully.",
         }
     except Exception as e:
         logger.error(f"Failed to reset reminders: {e}")

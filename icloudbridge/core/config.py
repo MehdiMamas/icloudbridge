@@ -202,6 +202,16 @@ class RemindersConfig(BaseSettings):
 
         return None
 
+    def reset_list_settings(self) -> None:
+        """Restore sync mode and list mappings to their defaults.
+
+        Mappings live in config.toml, not reminders.db, so clearing the
+        database alone leaves them behind. A later sync would then recreate
+        every list they name, including lists the user has since deleted.
+        """
+        self.sync_mode = "auto"
+        self.calendar_mappings = {"Reminders": "tasks"}
+
 
 class PhotosConfig(BaseSettings):
     """Configuration for Photos synchronization.

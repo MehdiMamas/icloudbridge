@@ -312,6 +312,10 @@ export default function Settings() {
         updatedFormData.reminders_caldav_password = '';
         updatedFormData.reminders_use_nextcloud = true;
         updatedFormData.reminders_nextcloud_url = '';
+        // The reset restored these to their defaults; sending the stale
+        // values back would bring deleted lists back on the next sync.
+        delete (updatedFormData as Record<string, unknown>).reminders_calendar_mappings;
+        delete (updatedFormData as Record<string, unknown>).reminders_sync_mode;
       } else if (service === 'passwords') {
         updatedFormData.passwords_enabled = false;
         updatedFormData.passwords_provider = 'vaultwarden';

@@ -223,6 +223,23 @@ class RemindersSyncEngine:
             # A list we have synced before but can no longer see is not the same
             # as a list the user emptied; withhold deletions in that case.
             apple_calendar_missing = target_apple_calendar is None
+
+            caldav_calendars = await self.caldav_adapter.list_calendars()
+            caldav_lookup = {cal["name"].lower(): cal for cal in caldav_calendars}
+            target_caldav_calendar = caldav_lookup.get(caldav_calendar_name.lower())
+
+            # A pair with no list on either side comes from a stale mapping
+            # (the user deleted the list, or the mapping outlived a reset).
+            # Creating both sides from nothing would bring a deleted list back.
+            if apple_calendar_missing and target_caldav_calendar is None:
+                logger.warning(
+                    "Skipping %s → %s: neither the Apple list nor the CalDAV calendar exists. "
+                    "Remove this mapping if the list was deleted.",
+                    apple_calendar_name,
+                    caldav_calendar_name,
+                )
+                return stats
+
             if not target_apple_calendar:
                 if dry_run:
                     logger.warning(
@@ -250,11 +267,8 @@ class RemindersSyncEngine:
 
             logger.info(f"Found {len(local_reminders)} local reminders")
 
-            # Check if CalDAV calendar exists, create if not
-            caldav_calendars = await self.caldav_adapter.list_calendars()
-            caldav_lookup = {cal["name"].lower(): cal for cal in caldav_calendars}
+            # Create the CalDAV calendar if it does not exist yet
             effective_caldav_name = caldav_calendar_name
-            target_caldav_calendar = caldav_lookup.get(caldav_calendar_name.lower())
             if not target_caldav_calendar:
                 if dry_run:
                     logger.warning(

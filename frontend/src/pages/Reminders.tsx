@@ -131,6 +131,7 @@ export default function Reminders() {
   const [mode, setMode] = useState<'auto' | 'manual'>('auto');
   const [listMappings, setListMappings] = useState<Record<string, string>>({});
   const [caldavCalendars, setCaldavCalendars] = useState<string[]>([]);
+  const [caldavReachable, setCaldavReachable] = useState(false);
   const [showMappings, setShowMappings] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
 
@@ -163,6 +164,23 @@ export default function Reminders() {
     () => resolveCalDavName(listMappings['Reminders'] || 'tasks'),
     [listMappings, resolveCalDavName]
   );
+
+  const appleListExists = useCallback(
+    (name: string) => lists.some((list) => list.name.toLowerCase() === name.toLowerCase()),
+    [lists]
+  );
+
+  // Saved mappings with no list on either side, usually left over from a
+  // deleted list. Sync skips them. Only judged once both sides have loaded,
+  // so an unreachable server does not make every mapping look stale.
+  const staleMappings = useMemo(() => {
+    if (!caldavReachable || lists.length === 0) return [];
+    return Object.entries(listMappings).filter(
+      ([appleList, caldavCalendar]) =>
+        !appleListExists(appleList) &&
+        !caldavCalendars.some((cal) => cal.toLowerCase() === caldavCalendar.toLowerCase())
+    );
+  }, [caldavReachable, lists, listMappings, caldavCalendars, appleListExists]);
 
   type SimulationStats = RemindersCalendarStats & { per_calendar?: Record<string, RemindersCalendarStats> };
 
@@ -220,11 +238,12 @@ export default function Reminders() {
       const [listsData, historyData, caldavCals] = await Promise.all([
         apiClient.getRemindersCalendars(),
         apiClient.getRemindersHistory(10),
-        apiClient.getCaldavCalendars().catch(() => []), // Don't fail if CalDAV not configured
+        apiClient.getCaldavCalendars().catch(() => null), // Don't fail if CalDAV not configured
       ]);
       setLists(listsData);
       setHistory(historyData.logs);
-      setCaldavCalendars(caldavCals);
+      setCaldavCalendars(caldavCals ?? []);
+      setCaldavReachable(caldavCals !== null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load data');
     } finally {
@@ -306,6 +325,27 @@ export default function Reminders() {
     }
   };
 
+  // Saves straight away: auto mode has no Save button. Starts from the saved
+  // mappings so unsaved manual edits are not committed along with it.
+  const handleRemoveStaleMapping = async (appleList: string) => {
+    try {
+      setError(null);
+      setSuccess(null);
+      const savedMappings = { ...(config?.reminders_calendar_mappings || {}) };
+      delete savedMappings[appleList];
+      const updated = await apiClient.updateConfig({ reminders_calendar_mappings: savedMappings });
+      setConfig(updated);
+      setListMappings((prev) => {
+        const next = { ...prev };
+        delete next[appleList];
+        return next;
+      });
+      setSuccess(`Removed the mapping for "${appleList}"`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to remove mapping');
+    }
+  };
+
   if (!loading && config && config.reminders_enabled === false) {
     return <ServiceDisabledNotice serviceName="Reminders" />;
   }
@@ -363,11 +403,14 @@ const renderChangeBadge = (
   };
 
   // Get unmapped CalDAV calendars (calendars that exist remotely but have no Apple list)
-  // This filters out any CalDAV calendar that is already mapped to an Apple list
+  // This filters out any CalDAV calendar that is already mapped to an existing Apple list
   // Example: If A->X, then X won't appear as a separate row since it's already mapped
+  // A calendar mapped to a missing Apple list keeps its row, or the mapping would be hidden
   const getUnmappedCaldavCalendars = () => {
     const mappedCalendars = new Set(
-      Object.values(listMappings).map((name) => name.toLowerCase())
+      Object.entries(listMappings)
+        .filter(([appleList]) => appleListExists(appleList))
+        .map(([, name]) => name.toLowerCase())
     );
     return caldavCalendars.filter(cal => !mappedCalendars.has(cal.toLowerCase()));
   };
@@ -806,6 +849,34 @@ const renderChangeBadge = (
           </CardDescription>
         </CardHeader>
         <CardContent>
+          {staleMappings.length > 0 && (
+            <Alert variant="warning" className="mb-4">
+              <AlertTitle>Mappings for lists that no longer exist</AlertTitle>
+              <AlertDescription>
+                <p className="text-sm">
+                  Neither the Apple list nor the CalDAV calendar exists for these saved mappings, so sync
+                  skips them. Remove any you no longer need.
+                </p>
+                <ul className="mt-2 space-y-1">
+                  {staleMappings.map(([appleList, caldavCalendar]) => (
+                    <li key={`stale-${appleList}`} className="flex items-center justify-between gap-2 text-sm">
+                      <span>
+                        <span className="font-medium">{appleList}</span> → {caldavCalendar}
+                      </span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleRemoveStaleMapping(appleList)}
+                      >
+                        <Trash2 className="h-3 w-3 mr-1" />
+                        Remove
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              </AlertDescription>
+            </Alert>
+          )}
           {mode === 'auto' ? (
             <Collapsible open={showMappings} onOpenChange={setShowMappings}>
               <CollapsibleTrigger asChild>
@@ -868,22 +939,27 @@ const renderChangeBadge = (
                             // In auto mode, exclude CalDAV calendars that match existing Apple list names
                             return !lists.some((list) => list.name.toLowerCase() === calendar.toLowerCase());
                           })
-                          .map((calendar) => (
-                            <tr key={`caldav-${calendar}`} className="border-b bg-muted/20">
-                              <td className="p-3">
-                                <div className="flex items-center gap-2">
-                                  <Calendar className="w-4 h-4 text-muted-foreground" />
-                                  <span className="font-medium text-muted-foreground italic">{calendar}</span>
-                                  <Badge variant="outline" className="text-xs text-amber-600 border-amber-300">
-                                    will be created
-                                  </Badge>
-                                </div>
-                              </td>
-                              <td className="p-3">
-                                <span className="text-muted-foreground">{calendar}</span>
-                              </td>
-                            </tr>
-                          ))
+                          .map((calendar) => {
+                            const appleList = Object.keys(listMappings).find(
+                              (key) => listMappings[key].toLowerCase() === calendar.toLowerCase()
+                            ) || calendar;
+                            return (
+                              <tr key={`caldav-${calendar}`} className="border-b bg-muted/20">
+                                <td className="p-3">
+                                  <div className="flex items-center gap-2">
+                                    <Calendar className="w-4 h-4 text-muted-foreground" />
+                                    <span className="font-medium text-muted-foreground italic">{appleList}</span>
+                                    <Badge variant="outline" className="text-xs text-amber-600 border-amber-300">
+                                      will be created
+                                    </Badge>
+                                  </div>
+                                </td>
+                                <td className="p-3">
+                                  <span className="text-muted-foreground">{calendar}</span>
+                                </td>
+                              </tr>
+                            );
+                          })
                         }
                       </tbody>
                     </table>

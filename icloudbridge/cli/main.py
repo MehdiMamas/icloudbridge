@@ -1236,11 +1236,12 @@ def reminders_reset(
         help="Skip confirmation prompt",
     ),
 ) -> None:
-    """Reset reminders sync database (clear all mappings)."""
+    """Reset reminders sync database and list settings (clear all mappings)."""
     cfg = ctx.obj["config"]
 
     if not yes:
         console.print("[yellow]This will clear all reminder sync mappings from the database.[/yellow]")
+        console.print("[yellow]List mappings and sync mode will be restored to their defaults.[/yellow]")
         console.print("[dim]Your reminders will NOT be deleted, only the sync tracking.[/dim]\n")
         confirmed = typer.confirm("Are you sure you want to continue?")
         if not confirmed:
@@ -1260,6 +1261,16 @@ def reminders_reset(
         console.print("[green]✓ Database reset complete[/green]")
 
     asyncio.run(reset_db())
+
+    cfg.reminders.reset_list_settings()
+    config_path = cfg.general.config_file or cfg.default_config_path
+    try:
+        cfg.ensure_data_dir()
+        cfg.save_to_file(config_path)
+        console.print("[green]✓ List mappings and sync mode reset to defaults[/green]")
+    except ImportError as e:
+        console.print(f"[red]Failed to save configuration: {e}[/red]")
+        raise typer.Exit(1)
 
 
 @reminders_app.command("set-password")
