@@ -58,7 +58,7 @@ async def list_calendars(engine: RemindersSyncEngineDep):
     """List all Apple Reminders lists.
 
     Returns:
-        List of reminder list names with reminder counts
+        List of reminder list names, each with its number of open reminders
     """
     try:
         # Get Apple Reminders lists
@@ -68,13 +68,12 @@ async def list_calendars(engine: RemindersSyncEngineDep):
         await adapter.request_access()
         calendars = await adapter.list_calendars()  # Fixed: added await
 
-        # Count reminders for each list
+        # Count open reminders, as Reminders.app does; completed ones are hidden there
         result = []
         for cal in calendars:
-            reminders = await adapter.get_reminders(calendar_id=cal.uuid)
             result.append({
                 "name": cal.title,  # Fixed: use 'name' to match frontend
-                "reminder_count": len(reminders),  # Fixed: actually count reminders
+                "reminder_count": await adapter.count_open_reminders(cal.uuid),
             })
 
         return {"calendars": result}

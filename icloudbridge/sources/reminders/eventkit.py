@@ -425,22 +425,9 @@ class RemindersAdapter:
             logger.warning(f"Calendar not found: {calendar_id or calendar_name}")
             return []
 
-        # Create predicate for fetching reminders
-        predicate = self.store.predicateForRemindersInCalendars_([target_calendar])
-
-        # Create future for async fetch
-        loop = asyncio.get_event_loop()
-        future = loop.create_future()
-
-        def fetch_callback(reminders: list) -> None:
-            if not future.done():
-                # Call from ObjC thread - must use call_soon_threadsafe
-                loop.call_soon_threadsafe(future.set_result, reminders)
-
-        self.store.fetchRemindersMatchingPredicate_completion_(predicate, fetch_callback)
-
-        # Wait for fetch to complete
-        ek_reminders = await future
+        ek_reminders = await self._fetch_reminders(
+            self.store.predicateForRemindersInCalendars_([target_calendar])
+        )
 
         # Convert to our dataclass format
         result = []
@@ -451,6 +438,40 @@ class RemindersAdapter:
             f"Fetched {len(result)} reminders from calendar '{target_calendar.title()}'"
         )
         return result
+
+    async def count_open_reminders(self, calendar_id: str) -> int:
+        """
+        Count the reminders in a list that are not completed.
+
+        This is the number Reminders.app shows beside a list. Completed
+        reminders are hidden there, and a list can hold hundreds of them.
+        """
+        if not RemindersAdapter._access_granted:
+            await self.request_access()
+
+        calendar = self.store.calendarWithIdentifier_(calendar_id)
+        if calendar is None:
+            return 0
+
+        reminders = await self._fetch_reminders(
+            self.store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(
+                None, None, [calendar]
+            )
+        )
+        return len(reminders)
+
+    async def _fetch_reminders(self, predicate: Any) -> list:
+        """Run an EventKit reminder query and wait for its result."""
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+
+        def fetch_callback(reminders: list) -> None:
+            if not future.done():
+                # Call from ObjC thread - must use call_soon_threadsafe
+                loop.call_soon_threadsafe(future.set_result, reminders or [])
+
+        self.store.fetchRemindersMatchingPredicate_completion_(predicate, fetch_callback)
+        return await future
 
     def _convert_from_eventkit(self, ek_reminder: EKReminder) -> EventKitReminder:
         """Convert an EKReminder to our EventKitReminder dataclass."""
