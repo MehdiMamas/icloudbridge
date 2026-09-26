@@ -11,7 +11,7 @@ import { Autocomplete, type AutocompleteOption } from '@/components/ui/autocompl
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import apiClient from '@/lib/api-client';
 import { useSyncStore } from '@/store/sync-store';
-import type { AppConfig, RemindersCalendar, SyncLog, SyncResponse } from '@/types/api';
+import type { AppConfig, DeletedRemindersList, RemindersCalendar, SyncLog, SyncResponse } from '@/types/api';
 import ServiceDisabledNotice from '@/components/ServiceDisabledNotice';
 
 // Helper type for reminder items
@@ -132,6 +132,8 @@ export default function Reminders() {
   const [listMappings, setListMappings] = useState<Record<string, string>>({});
   const [caldavCalendars, setCaldavCalendars] = useState<string[]>([]);
   const [caldavReachable, setCaldavReachable] = useState(false);
+  const [deletedLists, setDeletedLists] = useState<DeletedRemindersList[]>([]);
+  const [resolvingListId, setResolvingListId] = useState<number | null>(null);
   const [showMappings, setShowMappings] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
 
@@ -235,13 +237,15 @@ export default function Reminders() {
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const [listsData, historyData, caldavCals] = await Promise.all([
+      const [listsData, historyData, caldavCals, deletedListsData] = await Promise.all([
         apiClient.getRemindersCalendars(),
         apiClient.getRemindersHistory(10),
         apiClient.getCaldavCalendars().catch(() => null), // Don't fail if CalDAV not configured
+        apiClient.getDeletedRemindersLists().catch(() => []),
       ]);
       setLists(listsData);
       setHistory(historyData.logs);
+      setDeletedLists(deletedListsData);
       setCaldavCalendars(caldavCals ?? []);
       setCaldavReachable(caldavCals !== null);
     } catch (err) {
@@ -346,6 +350,44 @@ export default function Reminders() {
     }
   };
 
+  const handleDeletedList = async (list: DeletedRemindersList, action: 'delete' | 'restore') => {
+    if (action === 'delete') {
+      const [name, where] = list.deleted_side === 'apple'
+        ? [list.caldav_name, 'your CalDAV server']
+        : [list.apple_title, 'Apple Reminders'];
+      if (!confirm(`Delete "${name}" and every reminder in it from ${where}?\n\nThis cannot be undone.`)) {
+        return;
+      }
+    }
+
+    try {
+      setResolvingListId(list.id);
+      setError(null);
+      setSuccess(null);
+      if (action === 'delete') {
+        const result = await apiClient.deleteDeletedRemindersList(list.id);
+        // The backend also dropped any saved mapping for the list. Keep other
+        // unsaved manual edits, and refresh the saved copy they are based on.
+        const isThisList = (apple: string, caldav: string) =>
+          apple.toLowerCase() === list.apple_title.toLowerCase() ||
+          caldav.toLowerCase() === list.caldav_name.toLowerCase();
+        setListMappings((prev) =>
+          Object.fromEntries(Object.entries(prev).filter(([apple, caldav]) => !isThisList(apple, caldav)))
+        );
+        setConfig(await apiClient.getConfig());
+        setSuccess(result.message);
+      } else {
+        const result = await apiClient.restoreDeletedRemindersList(list.id);
+        setSuccess(result.message);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update the deleted list');
+    } finally {
+      setResolvingListId(null);
+      await loadData();
+    }
+  };
+
   if (!loading && config && config.reminders_enabled === false) {
     return <ServiceDisabledNotice serviceName="Reminders" />;
   }
@@ -406,6 +448,18 @@ const renderChangeBadge = (
   // This filters out any CalDAV calendar that is already mapped to an existing Apple list
   // Example: If A->X, then X won't appear as a separate row since it's already mapped
   // A calendar mapped to a missing Apple list keeps its row, or the mapping would be hidden
+  // A list deleted on one side waits for the user to delete or restore it. Sync
+  // neither recreates nor syncs it meanwhile, so it must not show "will be created".
+  const isDeletedInReminders = (caldavCalendar: string) =>
+    deletedLists.some(
+      (list) => list.deleted_side === 'apple' && list.caldav_name.toLowerCase() === caldavCalendar.toLowerCase()
+    );
+  const isDeletedOnServer = (appleList: string) =>
+    deletedLists.some(
+      (list) => list.deleted_side === 'caldav' && list.apple_title.toLowerCase() === appleList.toLowerCase()
+    );
+  const deletedListNote = 'Not synced until you delete or restore it at the top of this page.';
+
   const getUnmappedCaldavCalendars = () => {
     const mappedCalendars = new Set(
       Object.entries(listMappings)
@@ -445,6 +499,54 @@ const renderChangeBadge = (
         <Alert variant="success">
       <AlertTitle>Success</AlertTitle>
       <AlertDescription>{success}</AlertDescription>
+        </Alert>
+      )}
+
+      {deletedLists.length > 0 && (
+        <Alert variant="warning">
+          <AlertTitle>Lists deleted on one side</AlertTitle>
+          <AlertDescription>
+            <p className="text-sm">
+              These lists were deleted since they last synced, so they are no longer synced. Delete the copy that is
+              left, or restore the list to keep syncing it.
+              {!config?.reminders_auto_delete_lists &&
+                ' To delete the copy automatically next time, turn on "Delete lists automatically" in Settings.'}
+            </p>
+            <ul className="mt-2 space-y-2">
+              {deletedLists.map((list) => {
+                const deletedInApple = list.deleted_side === 'apple';
+                return (
+                  <li key={list.id} className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                    <span>
+                      <span className="font-medium">{deletedInApple ? list.apple_title : list.caldav_name}</span>
+                      {deletedInApple
+                        ? ` was deleted in Apple Reminders. Its copy on your CalDAV server is "${list.caldav_name}".`
+                        : ` was deleted on your CalDAV server. Its copy in Apple Reminders is "${list.apple_title}".`}
+                    </span>
+                    <span className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={resolvingListId !== null}
+                        onClick={() => handleDeletedList(list, 'delete')}
+                      >
+                        <Trash2 className="h-3 w-3 mr-1" />
+                        {deletedInApple ? 'Delete from server' : 'Delete from Reminders'}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={resolvingListId !== null}
+                        onClick={() => handleDeletedList(list, 'restore')}
+                      >
+                        {deletedInApple ? 'Restore in Reminders' : 'Restore on server'}
+                      </Button>
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          </AlertDescription>
         </Alert>
       )}
 
@@ -922,11 +1024,15 @@ const renderChangeBadge = (
                               <td className="p-3">
                                 <div className="flex items-center gap-2">
                                   <span className="text-muted-foreground">{caldavName}</span>
-                                  {!caldavExists && (
+                                  {!caldavExists && (isDeletedOnServer(list.name) ? (
+                                    <Badge variant="outline" className="text-xs text-red-600 border-red-300" title={deletedListNote}>
+                                      deleted on server
+                                    </Badge>
+                                  ) : (
                                     <Badge variant="outline" className="text-xs text-amber-600 border-amber-300">
                                       will be created
                                     </Badge>
-                                  )}
+                                  ))}
                                 </div>
                               </td>
                             </tr>
@@ -949,9 +1055,15 @@ const renderChangeBadge = (
                                   <div className="flex items-center gap-2">
                                     <Calendar className="w-4 h-4 text-muted-foreground" />
                                     <span className="font-medium text-muted-foreground italic">{appleList}</span>
-                                    <Badge variant="outline" className="text-xs text-amber-600 border-amber-300">
-                                      will be created
-                                    </Badge>
+                                    {isDeletedInReminders(calendar) ? (
+                                      <Badge variant="outline" className="text-xs text-red-600 border-red-300" title={deletedListNote}>
+                                        deleted in Reminders
+                                      </Badge>
+                                    ) : (
+                                      <Badge variant="outline" className="text-xs text-amber-600 border-amber-300">
+                                        will be created
+                                      </Badge>
+                                    )}
                                   </div>
                                 </td>
                                 <td className="p-3">
@@ -1023,7 +1135,11 @@ const renderChangeBadge = (
                                     searchPlaceholder="Search or create calendar..."
                                     allowCustom={true}
                                   />
-                                  {isNewCalendar && (
+                                  {isDeletedOnServer(list.name) ? (
+                                    <p className="text-xs text-red-600 dark:text-red-400">
+                                      Deleted on the CalDAV server. {deletedListNote}
+                                    </p>
+                                  ) : isNewCalendar && (
                                     <p className="text-xs text-amber-600 dark:text-amber-400">
                                       ⚠️ Calendar "{displayMapping}" will be created on CalDAV
                                     </p>
@@ -1076,7 +1192,11 @@ const renderChangeBadge = (
                                     searchPlaceholder="Search or create Apple list..."
                                     allowCustom={true}
                                   />
-                                  {isNewList && (
+                                  {isDeletedInReminders(calendar) ? (
+                                    <p className="text-xs text-red-600 dark:text-red-400">
+                                      Deleted in Apple Reminders. {deletedListNote}
+                                    </p>
+                                  ) : isNewList && (
                                     <p className="text-xs text-amber-600 dark:text-amber-400">
                                       ⚠️ Apple Reminders list "{currentMapping}" will be created
                                     </p>

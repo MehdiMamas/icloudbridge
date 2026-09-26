@@ -148,6 +148,10 @@ class RemindersConfig(BaseSettings):
         default_factory=lambda: {"Reminders": "tasks"}
     )
 
+    # When a synced list is deleted on one side, delete it on the other side
+    # too. Off by default: the deletion then waits for the user to confirm it.
+    auto_delete_lists: bool = False
+
     # Legacy fields for backward compatibility (deprecated)
     apple_calendar: str | None = None
     caldav_calendar: str | None = None
@@ -203,7 +207,7 @@ class RemindersConfig(BaseSettings):
         return None
 
     def reset_list_settings(self) -> None:
-        """Restore sync mode and list mappings to their defaults.
+        """Restore sync mode, list mappings and list deletion to their defaults.
 
         Mappings live in config.toml, not reminders.db, so clearing the
         database alone leaves them behind. A later sync would then recreate
@@ -211,6 +215,7 @@ class RemindersConfig(BaseSettings):
         """
         self.sync_mode = "auto"
         self.calendar_mappings = {"Reminders": "tasks"}
+        self.auto_delete_lists = False
 
 
 class PhotosConfig(BaseSettings):

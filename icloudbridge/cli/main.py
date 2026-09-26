@@ -1041,6 +1041,7 @@ def reminders_sync(
             caldav_password=caldav_password,
             db_path=cfg.reminders_db_path,
             caldav_ssl_verify_cert=ssl_verify_cert,
+            auto_delete_lists=cfg.reminders.auto_delete_lists,
         )
         await sync_engine.initialize()
 

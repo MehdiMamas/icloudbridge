@@ -60,6 +60,7 @@ export interface AppConfig {
   reminders_caldav_password_set?: boolean;
   reminders_caldav_ssl_verify_cert?: boolean | string;
   reminders_calendar_mappings?: Record<string, string>;
+  reminders_auto_delete_lists?: boolean;
   reminders_use_nextcloud?: boolean;
   reminders_nextcloud_url?: string;
   passwords_enabled: boolean;
@@ -313,6 +314,14 @@ export interface NotesFolder {
 export interface RemindersCalendar {
   name: string;
   reminder_count: number;
+}
+
+// A synced list deleted on one side, waiting for the user to delete or restore it
+export interface DeletedRemindersList {
+  id: number;
+  apple_title: string;
+  caldav_name: string;
+  deleted_side: 'apple' | 'caldav';
 }
 
 export interface RemindersStatusResponse {

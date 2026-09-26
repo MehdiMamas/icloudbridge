@@ -13,6 +13,7 @@ from icloudbridge.sources.reminders.caldav_adapter import (
 from icloudbridge.sources.reminders.eventkit import (
     EventKitReminder,
     ReminderAlarm,
+    ReminderCalendar,
     ReminderRecurrence,
     RemindersAdapter,
 )
@@ -92,6 +93,7 @@ class RemindersSyncEngine:
         caldav_password: str,
         db_path: Path,
         caldav_ssl_verify_cert: bool | str = True,
+        auto_delete_lists: bool = False,
     ):
         """
         Initialize the sync engine.
@@ -102,6 +104,8 @@ class RemindersSyncEngine:
             caldav_password: CalDAV password
             caldav_ssl_verify_cert: SSL verification flag or CA bundle path
             db_path: Path to SQLite database for state tracking
+            auto_delete_lists: When a synced list is deleted on one side, delete
+                               it on the other too instead of asking first
         """
         self.reminders_adapter = RemindersAdapter()
         self.caldav_adapter = CalDAVAdapter(
@@ -111,6 +115,7 @@ class RemindersSyncEngine:
             ssl_verify_cert=caldav_ssl_verify_cert,
         )
         self.db = RemindersDB(db_path)
+        self.auto_delete_lists = auto_delete_lists
 
     async def initialize(self) -> None:
         """
@@ -238,6 +243,20 @@ class RemindersSyncEngine:
                     apple_calendar_name,
                     caldav_calendar_name,
                 )
+                return stats
+
+            # A list that synced before and is now missing on one side was
+            # deleted there. Recreating it, as for a new list, would undo that.
+            if await self._handle_deleted_list(
+                apple_calendars,
+                target_apple_calendar,
+                target_caldav_calendar,
+                apple_calendar_name,
+                caldav_calendar_name,
+                stats,
+                dry_run=dry_run,
+                skip_deletions=skip_deletions,
+            ):
                 return stats
 
             if not target_apple_calendar:
@@ -401,6 +420,7 @@ class RemindersSyncEngine:
                 local_by_uuid,
                 remote_by_uid,
             )
+            await self._record_list_pair(effective_apple_name, effective_caldav_name)
 
             logger.info(f"Sync completed: {stats}")
             return stats
@@ -1133,6 +1153,200 @@ class RemindersSyncEngine:
         """Reset the database by clearing all mappings."""
         await self.db.clear_all_mappings()
         logger.info("Database reset complete")
+
+    @staticmethod
+    def _find_list_pair(
+        pairs: list[dict],
+        apple_calendar: ReminderCalendar | None,
+        caldav_calendar: dict | None,
+        apple_name: str,
+        caldav_name: str,
+    ) -> dict | None:
+        """The recorded pair a sync is about: matched by identity first, then by name."""
+        for pair in pairs:
+            if (apple_calendar and pair["apple_uuid"] == apple_calendar.uuid) or (
+                caldav_calendar and pair["caldav_url"] == caldav_calendar["url"]
+            ):
+                return pair
+        for pair in pairs:
+            if pair["apple_title"].lower() == apple_name.lower() or pair["caldav_name"].lower() == caldav_name.lower():
+                return pair
+        return None
+
+    @staticmethod
+    def _list_presence(
+        pair: dict, apple_calendars: list[ReminderCalendar], caldav_calendars: list[dict]
+    ) -> tuple[bool, bool]:
+        """Whether each side of a pair still has its list.
+
+        Identity comes first, so a renamed list still counts as present. The
+        name is the fallback because Apple may issue a list a new identifier
+        after a full resync.
+        """
+        apple_present = any(
+            cal.uuid == pair["apple_uuid"] or cal.title.lower() == pair["apple_title"].lower()
+            for cal in apple_calendars
+        )
+        caldav_present = any(
+            cal["url"] == pair["caldav_url"] or cal["name"].lower() == pair["caldav_name"].lower()
+            for cal in caldav_calendars
+        )
+        return apple_present, caldav_present
+
+    @classmethod
+    def _deleted_side(
+        cls, pair: dict, apple_calendars: list[ReminderCalendar], caldav_calendars: list[dict]
+    ) -> str | None:
+        """Return the side ("apple" or "caldav") that alone has lost its list, else None."""
+        apple_present, caldav_present = cls._list_presence(pair, apple_calendars, caldav_calendars)
+        if apple_present == caldav_present:
+            return None
+        return "caldav" if apple_present else "apple"
+
+    async def _handle_deleted_list(
+        self,
+        apple_calendars: list[ReminderCalendar],
+        target_apple_calendar: ReminderCalendar | None,
+        target_caldav_calendar: dict | None,
+        apple_calendar_name: str,
+        caldav_calendar_name: str,
+        stats: dict,
+        dry_run: bool,
+        skip_deletions: bool,
+    ) -> bool:
+        """
+        Deal with a pair whose list was deleted on one side since it last synced.
+
+        By default the deletion waits for the user to confirm it, and the pair
+        is not synced meanwhile. With auto_delete_lists, the other side's list
+        is deleted too, unless every synced list vanished from the same side
+        at once, which looks more like a fault than a decision.
+
+        Returns:
+            True if the pair must not be synced this run
+        """
+        pairs = await self.db.get_list_pairs()
+        pair = self._find_list_pair(
+            pairs, target_apple_calendar, target_caldav_calendar, apple_calendar_name, caldav_calendar_name
+        )
+        if pair is None:
+            return False
+
+        caldav_calendars = await self.caldav_adapter.list_calendar_urls()
+        deleted_side = self._deleted_side(pair, apple_calendars, caldav_calendars)
+
+        if deleted_side is None:
+            if pair["deleted_side"] and not dry_run:
+                logger.info(f"List '{pair['apple_title']}' is back on both sides; syncing it again")
+                await self.db.set_list_pair_deleted_side(pair["id"], None)
+            return False
+
+        # A list can also vanish because its account was signed out, or the
+        # server could not be read. Neither is the user deleting it.
+        if deleted_side == "apple" and pair["apple_source_id"] not in await self.reminders_adapter.list_source_ids():
+            raise SourceUnavailableError(
+                f"The Apple Reminders account that holds '{pair['apple_title']}' is not available, "
+                "so the list cannot be synced. Check that the account is signed in and Reminders "
+                "is turned on for it."
+            )
+        if deleted_side == "caldav" and not caldav_calendars:
+            raise SourceUnavailableError(
+                f"The CalDAV server returned no calendars, so '{pair['caldav_name']}' cannot be "
+                "synced. Check that the server is reachable and your credentials are correct."
+            )
+
+        where = "Apple Reminders" if deleted_side == "apple" else "CalDAV"
+        delete_now = self.auto_delete_lists and not skip_deletions
+        if delete_now and len(pairs) > 1 and all(
+            self._deleted_side(other, apple_calendars, caldav_calendars) == deleted_side for other in pairs
+        ):
+            logger.warning(f"Every synced list is missing from {where} at once; asking before deleting any")
+            delete_now = False
+
+        if dry_run:
+            logger.info(
+                f"Dry run: '{pair['apple_title']}' was deleted in {where} and would be "
+                f"{'deleted on the other side' if delete_now else 'held until you confirm'}"
+            )
+        elif delete_now:
+            logger.info(f"'{pair['apple_title']}' was deleted in {where}; deleting it on the other side")
+            await self._delete_list(pair, "caldav" if deleted_side == "apple" else "apple")
+        elif pair["deleted_side"] != deleted_side:
+            logger.info(f"'{pair['apple_title']}' was deleted in {where}; waiting for you to confirm")
+            await self.db.set_list_pair_deleted_side(pair["id"], deleted_side)
+
+        stats["lists_deleted" if delete_now else "lists_pending"] = 1
+        return True
+
+    async def _delete_list(self, pair: dict, side: str) -> None:
+        """Delete a pair's list on one side, then forget the pair and its reminders."""
+        if side == "caldav":
+            calendars = await self.caldav_adapter.list_calendar_urls()
+            target = next((c for c in calendars if c["url"] == pair["caldav_url"]), None) or next(
+                (c for c in calendars if c["name"].lower() == pair["caldav_name"].lower()), None
+            )
+            deleted = target is not None and await self.caldav_adapter.delete_calendar(target["url"])
+            name, where = pair["caldav_name"], "the CalDAV server"
+        else:
+            calendars = await self.reminders_adapter.list_calendars()
+            target = next((c for c in calendars if c.uuid == pair["apple_uuid"]), None) or next(
+                (c for c in calendars if c.title.lower() == pair["apple_title"].lower()), None
+            )
+            deleted = target is not None and await self.reminders_adapter.delete_calendar(target.uuid)
+            name, where = pair["apple_title"], "Apple Reminders"
+
+        if not deleted:
+            raise RuntimeError(f"Could not delete '{name}' from {where}")
+
+        await self.db.forget_list_pair(pair)
+
+    async def confirm_list_deletion(self, pair_id: int) -> dict:
+        """
+        Delete the copy left behind by a list the user deleted on the other side.
+
+        Checks again first: the list may have come back since the last sync.
+
+        Returns:
+            The pair that was deleted
+        """
+        pair = await self.db.get_list_pair(pair_id)
+        if pair is None or not pair["deleted_side"]:
+            raise LookupError("No deleted list with that ID is waiting to be confirmed.")
+
+        apple_calendars = await self.reminders_adapter.list_calendars()
+        if not apple_calendars:
+            raise SourceUnavailableError(
+                "Apple Reminders returned no lists, so nothing was deleted. Restart iCloudBridge "
+                "and re-grant Reminders access if prompted."
+            )
+        caldav_calendars = await self.caldav_adapter.list_calendar_urls()
+        apple_present, caldav_present = self._list_presence(pair, apple_calendars, caldav_calendars)
+
+        if apple_present and caldav_present:
+            await self.db.set_list_pair_deleted_side(pair_id, None)
+            raise ValueError(f"'{pair['apple_title']}' exists on both sides again, so nothing was deleted.")
+
+        if apple_present or caldav_present:
+            await self._delete_list(pair, "apple" if apple_present else "caldav")
+        else:
+            # Already gone from both sides; only the records are left
+            await self.db.forget_list_pair(pair)
+        return pair
+
+    async def _record_list_pair(self, apple_name: str, caldav_name: str) -> None:
+        """Remember that two lists synced, so that a later deletion can be recognised."""
+        apple = next(
+            (c for c in await self.reminders_adapter.list_calendars() if c.title.lower() == apple_name.lower()),
+            None,
+        )
+        caldav = next(
+            (c for c in await self.caldav_adapter.list_calendar_urls() if c["name"].lower() == caldav_name.lower()),
+            None,
+        )
+        if apple is None or caldav is None:
+            logger.warning(f"Could not record {apple_name} → {caldav_name} as synced: a list was not found")
+            return
+        await self.db.save_list_pair(apple.uuid, apple.title, apple.source_id, caldav["url"], caldav["name"])
 
     async def sync_all_calendars(
         self,

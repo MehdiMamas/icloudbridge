@@ -13,6 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Settings always showed "Use Nextcloud" ticked for Reminders, even for other CalDAV servers such as Synology or iCloud. It now matches how Reminders is actually set up. Unticking it no longer empties the CalDAV URL. Saving without typing the URL again used to stop Reminders syncing. The password field now says when a password is already stored, so you can leave it blank to keep it. Thanks to @r0ll3r for reporting this (#20).
 - If you use Nextcloud Passwords, saving Settings made the Passwords section switch to Bitwarden / Vaultwarden with empty fields. Saving again then really switched your Passwords sync to Bitwarden / Vaultwarden.
 - Settings and the setup wizard now ask browsers and password managers not to fill in the usernames and passwords for your servers. A login saved for iCloudBridge could otherwise replace what you had entered.
+- A Reminders list you deleted in Apple Reminders or on your CalDAV server came back on the next sync, recreated from the copy on the other side. iCloudBridge now remembers which lists have synced together. When one is deleted, it stops syncing that list and asks you on the Reminders page whether to delete the copy that's left or restore the list. It starts remembering lists at the first sync after you update, so a list deleted before then can still come back once (#21).
+
+### Added
+- A "Delete lists automatically" setting for Reminders. With it on, deleting a synced list on one side deletes it, and its reminders, on the other side too, without asking. It won't act while an account in Apple Reminders is signed out or turned off, or while your server lists no calendars. If every synced list disappears from one side at once, it asks you first instead.
 
 ### Changed
 - Syncing a named pair of lists with `icloudbridge reminders sync --apple-calendar … --caldav-calendar …` no longer creates both lists when neither exists. Create the list on one side first.

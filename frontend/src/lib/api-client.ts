@@ -14,6 +14,7 @@ import type {
   NotesFolder,
   NotesAllFoldersResponse,
   RemindersCalendar,
+  DeletedRemindersList,
   RemindersStatusResponse,
   Schedule,
   ScheduleCreate,
@@ -278,6 +279,33 @@ class APIClient {
       const { data } = await this.client.get<SyncHistoryResponse>('/reminders/history', {
         params: { limit },
       });
+      return data;
+    } catch (error) {
+      return this.handleError(error);
+    }
+  }
+
+  async getDeletedRemindersLists(): Promise<DeletedRemindersList[]> {
+    try {
+      const { data } = await this.client.get<{ lists: DeletedRemindersList[] }>('/reminders/deleted-lists');
+      return data.lists;
+    } catch (error) {
+      return this.handleError(error);
+    }
+  }
+
+  async deleteDeletedRemindersList(id: number): Promise<{ status: string; message: string }> {
+    try {
+      const { data } = await this.client.post(`/reminders/deleted-lists/${id}/delete`);
+      return data;
+    } catch (error) {
+      return this.handleError(error);
+    }
+  }
+
+  async restoreDeletedRemindersList(id: number): Promise<{ status: string; message: string }> {
+    try {
+      const { data } = await this.client.post(`/reminders/deleted-lists/${id}/restore`);
       return data;
     } catch (error) {
       return this.handleError(error);

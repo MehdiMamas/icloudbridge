@@ -640,6 +640,7 @@ class SchedulerManager:
             caldav_password=caldav_password,
             db_path=self.config.reminders_db_path,
             caldav_ssl_verify_cert=self.config.reminders.caldav_ssl_verify_cert,
+            auto_delete_lists=self.config.reminders.auto_delete_lists,
         )
         await engine.initialize()
 

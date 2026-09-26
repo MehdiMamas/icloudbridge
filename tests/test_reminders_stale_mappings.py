@@ -1,63 +1,11 @@
 """Saved list mappings must not bring deleted lists back (issue #19)."""
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from icloudbridge.api.routes import reminders as reminders_routes
 from icloudbridge.core.config import AppConfig
-from icloudbridge.core.reminders_sync import RemindersSyncEngine
-
-
-class FakeReminders:
-    """Reminders.app stand-in holding list names only."""
-
-    def __init__(self, lists: list[str]) -> None:
-        self.lists = list(lists)
-        self.created: list[str] = []
-
-    async def list_calendars(self):
-        return [SimpleNamespace(title=name, uuid=name) for name in self.lists]
-
-    async def create_calendar(self, name: str):
-        self.lists.append(name)
-        self.created.append(name)
-        return SimpleNamespace(title=name, uuid=name)
-
-    async def get_reminders(self, calendar_name: str):
-        return []
-
-
-class FakeCalDAV:
-    """CalDAV stand-in whose calendars all hold tasks."""
-
-    def __init__(self, calendars: list[str]) -> None:
-        self.names = list(calendars)
-        self.created: list[str] = []
-
-    @property
-    def calendars(self):
-        return [SimpleNamespace(name=name, get_supported_components=lambda: ["VTODO"]) for name in self.names]
-
-    async def list_calendars(self):
-        return [{"name": name} for name in self.names]
-
-    async def create_calendar(self, name: str) -> bool:
-        self.names.append(name)
-        self.created.append(name)
-        return True
-
-    async def get_todos(self, calendar_name: str):
-        return []
-
-
-async def make_engine(tmp_path, apple_lists, caldav_calendars):
-    engine = RemindersSyncEngine("https://dav.example.com", "user", "secret", tmp_path / "reminders.db")
-    await engine.db.initialize()
-    engine.reminders_adapter = FakeReminders(apple_lists)
-    engine.caldav_adapter = FakeCalDAV(caldav_calendars)
-    return engine, engine.reminders_adapter, engine.caldav_adapter
+from tests.reminders_fakes import make_engine
 
 
 @pytest.mark.parametrize("dry_run", [False, True])

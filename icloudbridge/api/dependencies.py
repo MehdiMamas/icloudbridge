@@ -89,6 +89,7 @@ async def get_reminders_sync_engine(
         caldav_password=caldav_password,
         db_path=db_path,
         caldav_ssl_verify_cert=config.reminders.caldav_ssl_verify_cert,
+        auto_delete_lists=config.reminders.auto_delete_lists,
     )
     await engine.initialize()
     return engine

@@ -363,6 +363,27 @@ class RemindersDB:
                 """
             )
 
+            # Lists that have synced together. Without a record of these, a
+            # list deleted on one side is indistinguishable from a new list on
+            # the other, and the next sync recreates it. deleted_side is set
+            # while a deletion waits for the user to confirm it.
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS list_pair (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    apple_uuid TEXT NOT NULL,
+                    apple_title TEXT NOT NULL,
+                    apple_source_id TEXT NOT NULL,
+                    caldav_url TEXT NOT NULL,
+                    caldav_name TEXT NOT NULL,
+                    deleted_side TEXT,
+                    last_sync_timestamp REAL NOT NULL,
+                    UNIQUE(apple_uuid),
+                    UNIQUE(caldav_url)
+                )
+                """
+            )
+
             await db.commit()
             logger.debug(f"Reminders database initialized at {self.db_path}")
 
@@ -508,14 +529,80 @@ class RemindersDB:
             await db.commit()
             logger.debug(f"Deleted reminder mapping: local={local_uuid}, remote={remote_uid}")
 
+    async def get_list_pairs(self) -> list[dict]:
+        """Get every list pair that has synced."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM list_pair") as cursor:
+                return [dict(row) for row in await cursor.fetchall()]
+
+    async def get_list_pair(self, pair_id: int) -> dict | None:
+        """Get one list pair by ID."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM list_pair WHERE id = ?", (pair_id,)) as cursor:
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+
+    async def save_list_pair(
+        self,
+        apple_uuid: str,
+        apple_title: str,
+        apple_source_id: str,
+        caldav_url: str,
+        caldav_name: str,
+    ) -> None:
+        """Record that two lists synced together, replacing any older pairing of either."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "DELETE FROM list_pair WHERE apple_uuid = ? OR caldav_url = ?",
+                (apple_uuid, caldav_url),
+            )
+            await db.execute(
+                """
+                INSERT INTO list_pair
+                (apple_uuid, apple_title, apple_source_id, caldav_url, caldav_name, last_sync_timestamp)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (apple_uuid, apple_title, apple_source_id, caldav_url, caldav_name, datetime.now().timestamp()),
+            )
+            await db.commit()
+
+    async def set_list_pair_deleted_side(self, pair_id: int, deleted_side: str | None) -> None:
+        """Mark a pair as waiting for a deletion to be confirmed, or clear that."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE list_pair SET deleted_side = ? WHERE id = ?",
+                (deleted_side, pair_id),
+            )
+            await db.commit()
+
+    async def forget_list_pair(self, pair: dict) -> None:
+        """Forget a list pair, and the mappings of the reminders in its calendar.
+
+        Each mapping stores its TODO's URL, which sits under the calendar's.
+        Left behind, they would make every reminder in a recreated list look
+        deleted on the next sync.
+        """
+        prefix = pair["caldav_url"] if pair["caldav_url"].endswith("/") else f"{pair['caldav_url']}/"
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "DELETE FROM reminder_mapping WHERE substr(remote_caldav_url, 1, ?) = ?",
+                (len(prefix), prefix),
+            )
+            await db.execute("DELETE FROM list_pair WHERE id = ?", (pair["id"],))
+            await db.commit()
+            logger.debug(f"Forgot list pair {pair['apple_title']} → {pair['caldav_name']}")
+
     async def clear_all_mappings(self) -> None:
         """
-        Clear all reminder mappings from the database.
+        Clear all reminder mappings and list pairs from the database.
 
         This does NOT delete any reminders - it only clears the sync tracking.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("DELETE FROM reminder_mapping")
+            await db.execute("DELETE FROM list_pair")
             await db.commit()
             logger.info("All reminder mappings cleared from database")
 

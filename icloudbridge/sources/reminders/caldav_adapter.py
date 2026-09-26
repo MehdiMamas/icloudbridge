@@ -173,6 +173,48 @@ class CalDAVAdapter:
         logger.info(f"Found {len(result)} todo-capable calendars out of {len(self.calendars)} total")
         return result
 
+    async def list_calendar_urls(self) -> list[dict[str, str]]:
+        """
+        Name and URL of every calendar, without checking what each supports.
+
+        Unlike list_calendars(), this makes no request per calendar, so a
+        calendar that fails to answer is not silently left out. Use it to
+        decide whether a calendar still exists.
+
+        Returns:
+            List of dicts with 'name' and 'url' keys; empty if not connected
+        """
+        if not self.client:
+            await self.connect()
+        return [{"name": cal.name, "url": str(cal.url)} for cal in self.calendars]
+
+    async def delete_calendar(self, calendar_url: str) -> bool:
+        """
+        Delete a calendar, and every TODO in it, from the server.
+
+        Args:
+            calendar_url: URL of the calendar to delete
+
+        Returns:
+            True if deleted, False if not found or the server refused
+        """
+        if not self.client or not self.principal:
+            await self.connect()
+
+        calendar = next((cal for cal in self.calendars if str(cal.url) == calendar_url), None)
+        if calendar is None:
+            logger.warning(f"CalDAV calendar not found for deletion: {calendar_url}")
+            return False
+
+        try:
+            await asyncio.to_thread(calendar.delete)
+            self.calendars = await asyncio.to_thread(self.principal.calendars)
+            logger.info(f"Deleted CalDAV calendar: {calendar.name}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete CalDAV calendar '{calendar.name}': {e}", exc_info=True)
+            return False
+
     async def create_calendar(self, calendar_name: str) -> bool:
         """
         Create a new TODO-only calendar on the CalDAV server.

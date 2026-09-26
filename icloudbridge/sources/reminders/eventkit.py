@@ -145,6 +145,7 @@ class ReminderCalendar:
     uuid: str
     title: str
     reminder_count: int = 0
+    source_id: str = ""  # The account the list belongs to
 
 
 class RemindersAdapter:
@@ -240,9 +241,23 @@ class RemindersAdapter:
         """Read reminder calendars straight from the store, without recovery."""
         calendars = self.store.calendarsForEntityType_(EKEntityTypeReminder) or []
         return [
-            ReminderCalendar(uuid=cal.calendarIdentifier(), title=cal.title())
+            ReminderCalendar(
+                uuid=cal.calendarIdentifier(),
+                title=cal.title(),
+                source_id=cal.source().sourceIdentifier() if cal.source() else "",
+            )
             for cal in calendars
         ]
+
+    async def list_source_ids(self) -> set[str]:
+        """IDs of the accounts (iCloud, On My Mac, ...) Reminders can see.
+
+        When an account is signed out or turned off, all its lists vanish at
+        once. Checking the account tells that apart from a deleted list.
+        """
+        if not RemindersAdapter._access_granted:
+            await self.request_access()
+        return {source.sourceIdentifier() for source in (self.store.sources() or [])}
 
     async def list_calendars(self) -> list[ReminderCalendar]:
         """
@@ -333,6 +348,7 @@ class RemindersAdapter:
                 return ReminderCalendar(
                     uuid=new_calendar.calendarIdentifier(),
                     title=new_calendar.title(),
+                    source_id=default_source.sourceIdentifier(),
                 )
             else:
                 logger.error(f"Failed to create calendar: {calendar_name}")
@@ -346,6 +362,33 @@ class RemindersAdapter:
         except Exception as e:
             logger.error(f"Failed to create calendar '{calendar_name}': {e}", exc_info=True)
             return None
+
+    async def delete_calendar(self, calendar_id: str) -> bool:
+        """
+        Delete a reminder list, and every reminder in it.
+
+        Args:
+            calendar_id: Identifier of the list to delete
+
+        Returns:
+            True if deleted, False if the list was not found or could not be deleted
+        """
+        if not RemindersAdapter._access_granted:
+            await self.request_access()
+
+        calendar = self.store.calendarWithIdentifier_(calendar_id)
+        if calendar is None:
+            logger.warning(f"Reminder list not found for deletion: {calendar_id}")
+            return False
+
+        title = calendar.title()
+        ok, error = self.store.removeCalendar_commit_error_(calendar, True, None)
+        if not ok:
+            logger.error(f"Failed to delete reminder list '{title}': {error}")
+            return False
+
+        logger.info(f"Deleted reminder list: {title}")
+        return True
 
     async def get_reminders(
         self, calendar_id: str | None = None, calendar_name: str | None = None

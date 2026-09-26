@@ -106,6 +106,7 @@ def _config_response(config) -> ConfigResponse:
         notes_folder_mappings=_serialize_folder_mappings(config.notes.folder_mappings),
         reminders_sync_mode=config.reminders.sync_mode,
         reminders_calendar_mappings=config.reminders.calendar_mappings or {},
+        reminders_auto_delete_lists=config.reminders.auto_delete_lists,
         reminders_caldav_ssl_verify_cert=config.reminders.caldav_ssl_verify_cert,
         passwords_provider=config.passwords.provider,
         passwords_ssl_verify_cert=config.passwords.passwords_ssl_verify_cert,
@@ -196,6 +197,9 @@ async def update_config(update: ConfigUpdateRequest, config: ConfigDep):
     if update.reminders_sync_mode is not None:
         config.reminders.sync_mode = update.reminders_sync_mode
         logger.info(f"Updated sync mode: {update.reminders_sync_mode}")
+    if update.reminders_auto_delete_lists is not None:
+        config.reminders.auto_delete_lists = update.reminders_auto_delete_lists
+        logger.info(f"Updated automatic list deletion: {update.reminders_auto_delete_lists}")
     if update.reminders_caldav_ssl_verify_cert is not None:
         config.reminders.caldav_ssl_verify_cert = update.reminders_caldav_ssl_verify_cert
         logger.info(f"Updated CalDAV SSL verify setting: {update.reminders_caldav_ssl_verify_cert}")

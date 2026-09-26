@@ -1220,6 +1220,25 @@ export default function Settings() {
                   </AlertDescription>
                 </Alert>
               )}
+
+              <div className="flex items-center justify-between p-4 border rounded-lg">
+                <div>
+                  <Label>Delete lists automatically</Label>
+                  <p className="text-xs text-muted-foreground">
+                    When you delete a synced list on one side, delete it and its reminders on the other side too.
+                    When off, the Reminders page asks you first.
+                  </p>
+                </div>
+                <Switch
+                  checked={formData.reminders_auto_delete_lists === true}
+                  onCheckedChange={(checked) =>
+                    setFormData({
+                      ...formData,
+                      reminders_auto_delete_lists: checked,
+                    })
+                  }
+                />
+              </div>
             </>
           )}
         </CardContent>

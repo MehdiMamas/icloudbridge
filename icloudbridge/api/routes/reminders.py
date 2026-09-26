@@ -33,18 +33,24 @@ def _reminder_stats_message(stats: dict) -> str:
     total_changes = total_created + total_updated + total_deleted
 
     if total_changes == 0:
-        return "No changes detected"
+        message = "No changes detected"
+    else:
+        msg_parts = []
+        if total_created > 0:
+            msg_parts.append(f"created {total_created}")
+        if total_updated > 0:
+            msg_parts.append(f"updated {total_updated}")
+        if total_deleted > 0:
+            msg_parts.append(f"deleted {total_deleted}")
 
-    msg_parts = []
-    if total_created > 0:
-        msg_parts.append(f"created {total_created}")
-    if total_updated > 0:
-        msg_parts.append(f"updated {total_updated}")
-    if total_deleted > 0:
-        msg_parts.append(f"deleted {total_deleted}")
+        details = ", ".join(msg_parts)
+        message = f"Synced {calendars_count} calendar(s): {details} reminder(s)"
 
-    details = ", ".join(msg_parts)
-    return f"Synced {calendars_count} calendar(s): {details} reminder(s)"
+    if stats.get("total_lists_deleted", 0) > 0:
+        message += f"; deleted {stats['total_lists_deleted']} list(s) that were deleted on the other side"
+    if stats.get("total_lists_pending", 0) > 0:
+        message += f"; {stats['total_lists_pending']} deleted list(s) need your confirmation"
+    return message
 
 
 @router.get("/calendars")
@@ -172,6 +178,8 @@ async def sync_reminders(
             total_updated = 0
             total_deleted = 0
             total_unchanged = 0
+            total_lists_deleted = 0
+            total_lists_pending = 0
             aggregate_error_messages: list[str] = []
 
             for cal_stats in per_calendar_results.values():
@@ -180,6 +188,8 @@ async def sync_reminders(
                 total_updated += cal_stats.get("updated_remote", 0) + cal_stats.get("updated_local", 0)
                 total_deleted += cal_stats.get("deleted_remote", 0) + cal_stats.get("deleted_local", 0)
                 total_unchanged += cal_stats.get("unchanged", 0)
+                total_lists_deleted += cal_stats.get("lists_deleted", 0)
+                total_lists_pending += cal_stats.get("lists_pending", 0)
                 aggregate_error_messages.extend(cal_stats.get("error_messages", []))
 
             # Return per-calendar stats with aggregated totals
@@ -191,6 +201,8 @@ async def sync_reminders(
                 "total_updated": total_updated,
                 "total_deleted": total_deleted,
                 "total_unchanged": total_unchanged,
+                "total_lists_deleted": total_lists_deleted,
+                "total_lists_pending": total_lists_pending,
                 "error_messages": aggregate_error_messages,
             }
 
@@ -211,6 +223,8 @@ async def sync_reminders(
                 "total_updated": 0,
                 "total_deleted": 0,
                 "total_unchanged": 0,
+                "total_lists_deleted": 0,
+                "total_lists_pending": 0,
                 "total_errors": 0,
                 "error_messages": [],
                 "per_calendar": {},
@@ -232,6 +246,8 @@ async def sync_reminders(
                     all_stats["total_updated"] += result.get("updated_local", 0) + result.get("updated_remote", 0)
                     all_stats["total_deleted"] += result.get("deleted_local", 0) + result.get("deleted_remote", 0)
                     all_stats["total_unchanged"] += result.get("unchanged", 0)
+                    all_stats["total_lists_deleted"] += result.get("lists_deleted", 0)
+                    all_stats["total_lists_pending"] += result.get("lists_pending", 0)
                     all_stats["total_errors"] += result.get("errors", 0)
                     if result.get("error_messages"):
                         all_stats["error_messages"].extend(result["error_messages"])
@@ -455,6 +471,76 @@ async def get_history(
         "limit": limit,
         "offset": offset,
     }
+
+
+@router.get("/deleted-lists")
+async def list_deleted_lists(reminders_db: RemindersDBDep):
+    """Lists deleted on one side that are waiting for the user to decide.
+
+    Returns:
+        Each waiting list, with the side it was deleted on ("apple" or "caldav")
+    """
+    pairs = await reminders_db.get_list_pairs()
+    return {
+        "lists": [
+            {
+                "id": pair["id"],
+                "apple_title": pair["apple_title"],
+                "caldav_name": pair["caldav_name"],
+                "deleted_side": pair["deleted_side"],
+            }
+            for pair in pairs
+            if pair["deleted_side"]
+        ]
+    }
+
+
+@router.post("/deleted-lists/{pair_id}/delete")
+async def confirm_list_deletion(pair_id: int, engine: RemindersSyncEngineDep, config: ConfigDep):
+    """Delete the copy left behind by a list that was deleted on the other side.
+
+    Also drops any saved mapping for it, since the list no longer exists anywhere.
+    """
+    try:
+        pair = await engine.confirm_list_deletion(pair_id)
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to delete list: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete list: {str(e)}"
+        )
+
+    mappings = config.reminders.calendar_mappings or {}
+    remaining = {
+        apple: caldav
+        for apple, caldav in mappings.items()
+        if apple.lower() != pair["apple_title"].lower() and caldav.lower() != pair["caldav_name"].lower()
+    }
+    if remaining != mappings:
+        config.reminders.calendar_mappings = remaining
+        config.save_to_file(config.default_config_path)
+        get_config.cache_clear()
+
+    name = pair["caldav_name"] if pair["deleted_side"] == "apple" else pair["apple_title"]
+    return {"status": "success", "message": f"Deleted '{name}'."}
+
+
+@router.post("/deleted-lists/{pair_id}/restore")
+async def restore_deleted_list(pair_id: int, reminders_db: RemindersDBDep):
+    """Keep a list that was deleted on one side: the next sync recreates it there."""
+    pair = await reminders_db.get_list_pair(pair_id)
+    if pair is None or not pair["deleted_side"]:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No deleted list with that ID is waiting to be confirmed.",
+        )
+
+    await reminders_db.forget_list_pair(pair)
+    return {"status": "success", "message": f"'{pair['apple_title']}' will be recreated on the next sync."}
 
 
 @router.post("/reset")
