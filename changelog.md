@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.3.1] - 2026-09-26
 
 ### Fixed
 - "Reset Reminders" didn't fully reset. It kept the lists you had chosen to sync, so a list you had since deleted came back after you set Reminders up again, even with a different, empty CalDAV account. It reappeared both in Apple Reminders and on the server. Resetting now also restores the list mappings and sync mode to their defaults. Thanks to @r0ll3r for reporting this (#19).
