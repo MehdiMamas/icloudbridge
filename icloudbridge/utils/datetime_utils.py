@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
+from zoneinfo import ZoneInfo
 
 # Safe timestamp bounds (year 1970 to year 3000)
 MIN_TIMESTAMP = 0
@@ -28,3 +29,14 @@ def safe_fromtimestamp(timestamp: float | None, tz=None) -> datetime | None:
         return datetime.fromtimestamp(timestamp, tz=tz) if tz else datetime.fromtimestamp(timestamp)
     except (OSError, OverflowError, ValueError):
         return None
+
+
+def local_timezone() -> tzinfo:
+    """The Mac's time zone, with its daylight saving rules."""
+    try:
+        from Foundation import NSTimeZone
+
+        return ZoneInfo(NSTimeZone.localTimeZone().name())
+    except Exception:
+        # No IANA name to go by: today's offset is the best there is
+        return datetime.now().astimezone().tzinfo

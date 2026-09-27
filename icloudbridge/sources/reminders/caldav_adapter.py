@@ -11,6 +11,8 @@ from caldav import DAVClient, Todo
 from icalendar import Alarm, Calendar
 from icalendar import Todo as VTodo
 
+from icloudbridge.utils.datetime_utils import local_timezone
+
 logger = logging.getLogger(__name__)
 
 
@@ -376,9 +378,9 @@ class CalDAVAdapter:
                     # Specific time
                     is_all_day = False
                     due_date = due_date_value
-                    # Ensure timezone is set
+                    # A time with no time zone (floating) is local time
                     if due_date and not due_date.tzinfo:
-                        due_date = due_date.replace(tzinfo=timezone.utc)
+                        due_date = due_date.replace(tzinfo=local_timezone())
 
             # Timestamps - strip microseconds as iCalendar doesn't support them
             # IMPORTANT: Never default to datetime.now() for timestamps used in sync!
@@ -432,6 +434,8 @@ class CalDAVAdapter:
             # Parse alarms (VALARM components)
             dtstart = vtodo.get("DTSTART")
             start = dtstart.dt if dtstart is not None and hasattr(dtstart, "dt") else None
+            if isinstance(start, datetime) and not start.tzinfo:
+                start = start.replace(tzinfo=local_timezone())
             alarms = []
             for component in vtodo.walk():
                 if component.name == "VALARM":

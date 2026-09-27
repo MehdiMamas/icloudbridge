@@ -12,6 +12,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Two kinds of alarm never reached your CalDAV server: the alarm at a reminder's due time, and alarms at a fixed date and time. Both now sync. On a reminder that has already synced, they reach the server the next time you change its alarms in Apple Reminders.
 - Alarms from your CalDAV server could arrive wrong in Apple Reminders. An alarm at a fixed date and time became one relative to the due date, or was dropped if the task had no due date. An alarm after the due date became one before it. An alarm relative to a task's start date was treated as relative to its due date. Alarms now arrive as they were set (#25).
 - The alarms iCloudBridge wrote to your CalDAV server didn't say they were relative to the due date. Apps that follow the standard could read them as relative to a start date the task doesn't have. They now say so.
+- Editing a reminder on your CalDAV server moved its due time in Apple Reminders by your time zone's difference from UTC. In the UK in summer, a reminder due at 10:00 came back due at 09:00, and each later edit on the server could move it again. Due times now keep their time. Reminders that already moved stay where they are, so check the due times of reminders you've edited on the server (#30).
+- A reminder due on the other side of a daylight saving change reached your CalDAV server an hour out. In the UK in summer, a reminder due at 10:00 in December arrived as 09:00.
+- A due time with no time zone was treated as UTC, in both directions. It's now taken as your Mac's local time.
 
 ## [0.3.1] - 2026-09-26
 
