@@ -116,8 +116,14 @@ class ReminderRecurrence:
     interval: int = 1  # Every X days/weeks/months/years
     end_date: datetime | None = None
     occurrence_count: int | None = None
-    days_of_week: list[int] = field(default_factory=list)  # 0=Sunday, 1=Monday, etc.
-    days_of_month: list[int] | None = None  # Days of month (1-31) for monthly recurrence
+    # (weekday, position): weekday 1=Sunday … 7=Saturday; position 0 = every such day,
+    # 2 = the second, -1 = the last
+    days_of_week: list[tuple[int, int]] = field(default_factory=list)
+    days_of_month: list[int] | None = None  # Days of month (1-31, negative counts from the end)
+    months_of_year: list[int] | None = None  # Months (1-12)
+    weeks_of_year: list[int] | None = None  # Weeks of the year
+    days_of_year: list[int] | None = None  # Days of the year
+    set_positions: list[int] | None = None  # Which of the matching days to use, e.g. -1 = last
 
 
 # ReminderRecurrence.frequency values (the RRULE FREQ names) and their EventKit frequencies
@@ -251,6 +257,65 @@ def due_date_components(due_date: datetime, is_all_day: bool) -> NSDateComponent
     ns_zone = NSTimeZone.timeZoneWithName_(zone_name) if zone_name else None
     components.setTimeZone_(ns_zone or NSTimeZone.localTimeZone())
     return components
+
+
+def _numbers(values) -> list[int] | None:
+    """An NSArray of NSNumbers as ints, or None when there are none."""
+    return [int(value) for value in values] if values else None
+
+
+def recurrence_from_eventkit(rule: EKRecurrenceRule) -> ReminderRecurrence:
+    """Read an EKRecurrenceRule, with every part it can hold."""
+    frequencies = {value: name for name, value in RECURRENCE_FREQUENCIES.items()}
+    recurrence = ReminderRecurrence(
+        frequency=frequencies.get(rule.frequency(), "DAILY"),
+        interval=rule.interval(),
+    )
+
+    # Extract end date or occurrence count
+    end = rule.recurrenceEnd()
+    if end:
+        if end.endDate():
+            recurrence.end_date = normalize_date(end.endDate())
+        elif end.occurrenceCount():
+            recurrence.occurrence_count = end.occurrenceCount()
+
+    recurrence.days_of_week = [
+        (day.dayOfTheWeek(), day.weekNumber()) for day in rule.daysOfTheWeek() or []
+    ]
+    recurrence.days_of_month = _numbers(rule.daysOfTheMonth())
+    recurrence.months_of_year = _numbers(rule.monthsOfTheYear())
+    recurrence.weeks_of_year = _numbers(rule.weeksOfTheYear())
+    recurrence.days_of_year = _numbers(rule.daysOfTheYear())
+    recurrence.set_positions = _numbers(rule.setPositions())
+    return recurrence
+
+
+def recurrence_to_eventkit(rec_data: ReminderRecurrence) -> EKRecurrenceRule:
+    """Build the EKRecurrenceRule for a recurrence rule."""
+    frequency = RECURRENCE_FREQUENCIES.get(rec_data.frequency, EKRecurrenceFrequencyDaily)
+
+    rec_end = None
+    if rec_data.end_date:
+        rec_end = EKRecurrenceEnd.recurrenceEndWithEndDate_(rec_data.end_date)
+    elif rec_data.occurrence_count:
+        rec_end = EKRecurrenceEnd.recurrenceEndWithOccurrenceCount_(rec_data.occurrence_count)
+
+    days_of_week = [
+        EKRecurrenceDayOfWeek.dayOfWeek_weekNumber_(day, position)
+        for day, position in rec_data.days_of_week or []
+    ]
+    return EKRecurrenceRule.alloc().initRecurrenceWithFrequency_interval_daysOfTheWeek_daysOfTheMonth_monthsOfTheYear_weeksOfTheYear_daysOfTheYear_setPositions_end_(
+        frequency,
+        rec_data.interval,
+        days_of_week or None,
+        rec_data.days_of_month or None,
+        rec_data.months_of_year or None,
+        rec_data.weeks_of_year or None,
+        rec_data.days_of_year or None,
+        rec_data.set_positions or None,
+        rec_end,
+    )
 
 
 @dataclass
@@ -625,33 +690,9 @@ class RemindersAdapter:
         # Extract recurrence rules
         recurrence_rules = []
         if ek_reminder.hasRecurrenceRules():
-            for rule in ek_reminder.recurrenceRules() or []:
-                freq_map = {
-                    EKRecurrenceFrequencyDaily: "DAILY",
-                    EKRecurrenceFrequencyWeekly: "WEEKLY",
-                    EKRecurrenceFrequencyMonthly: "MONTHLY",
-                    EKRecurrenceFrequencyYearly: "YEARLY",
-                }
-                frequency = freq_map.get(rule.frequency(), "DAILY")
-
-                rec_obj = ReminderRecurrence(
-                    frequency=frequency,
-                    interval=rule.interval(),
-                )
-
-                # Extract end date or occurrence count
-                if rule.recurrenceEnd():
-                    end = rule.recurrenceEnd()
-                    if end.endDate():
-                        rec_obj.end_date = normalize_date(end.endDate())
-                    elif end.occurrenceCount():
-                        rec_obj.occurrence_count = end.occurrenceCount()
-
-                # Extract days of week
-                if rule.daysOfTheWeek():
-                    rec_obj.days_of_week = [day.dayOfTheWeek() for day in rule.daysOfTheWeek()]
-
-                recurrence_rules.append(rec_obj)
+            recurrence_rules = [
+                recurrence_from_eventkit(rule) for rule in ek_reminder.recurrenceRules() or []
+            ]
 
         return EventKitReminder(
             uuid=ek_reminder.calendarItemIdentifier(),
@@ -727,38 +768,7 @@ class RemindersAdapter:
         # Add recurrence rules
         if recurrence_rules:
             for rec_data in recurrence_rules:
-                frequency = RECURRENCE_FREQUENCIES.get(
-                    rec_data.frequency, EKRecurrenceFrequencyDaily
-                )
-
-                # Create recurrence end
-                rec_end = None
-                if rec_data.end_date:
-                    rec_end = EKRecurrenceEnd.recurrenceEndWithEndDate_(rec_data.end_date)
-                elif rec_data.occurrence_count:
-                    rec_end = EKRecurrenceEnd.recurrenceEndWithOccurrenceCount_(
-                        rec_data.occurrence_count
-                    )
-
-                # Create days of week
-                days_of_week = None
-                if rec_data.days_of_week:
-                    days_of_week = [
-                        EKRecurrenceDayOfWeek.dayOfWeek_(day) for day in rec_data.days_of_week
-                    ]
-
-                rule = EKRecurrenceRule.alloc().initRecurrenceWithFrequency_interval_daysOfTheWeek_daysOfTheMonth_monthsOfTheYear_weeksOfTheYear_daysOfTheYear_setPositions_end_(
-                    frequency,
-                    rec_data.interval,
-                    days_of_week,
-                    None,  # daysOfTheMonth
-                    None,  # monthsOfTheYear
-                    None,  # weeksOfTheYear
-                    None,  # daysOfTheYear
-                    None,  # setPositions
-                    rec_end,
-                )
-                reminder.addRecurrenceRule_(rule)
+                reminder.addRecurrenceRule_(recurrence_to_eventkit(rec_data))
 
         # Set URL
         if url:
@@ -843,36 +853,7 @@ class RemindersAdapter:
                 reminder.removeRecurrenceRule_(rule)
             # Add new rules
             for rec_data in recurrence_rules:
-                frequency = RECURRENCE_FREQUENCIES.get(
-                    rec_data.frequency, EKRecurrenceFrequencyDaily
-                )
-
-                rec_end = None
-                if rec_data.end_date:
-                    rec_end = EKRecurrenceEnd.recurrenceEndWithEndDate_(rec_data.end_date)
-                elif rec_data.occurrence_count:
-                    rec_end = EKRecurrenceEnd.recurrenceEndWithOccurrenceCount_(
-                        rec_data.occurrence_count
-                    )
-
-                days_of_week = None
-                if rec_data.days_of_week:
-                    days_of_week = [
-                        EKRecurrenceDayOfWeek.dayOfWeek_(day) for day in rec_data.days_of_week
-                    ]
-
-                rule = EKRecurrenceRule.alloc().initRecurrenceWithFrequency_interval_daysOfTheWeek_daysOfTheMonth_monthsOfTheYear_weeksOfTheYear_daysOfTheYear_setPositions_end_(
-                    frequency,
-                    rec_data.interval,
-                    days_of_week,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    rec_end,
-                )
-                reminder.addRecurrenceRule_(rule)
+                reminder.addRecurrenceRule_(recurrence_to_eventkit(rec_data))
 
         # Update URL
         if url is not None:

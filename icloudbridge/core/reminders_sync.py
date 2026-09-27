@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import re
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,13 +32,17 @@ logger = logging.getLogger(__name__)
 # whenever a conversion changes what a side's alarms or repeat rules sync as. Older
 # fingerprints then count as missing, so the next sync records new ones instead of
 # taking the difference for an edit.
-FINGERPRINT_VERSION = 2
+FINGERPRINT_VERSION = 3
 
 
 def _fingerprint(items: list) -> str:
     """Short hash of a list of alarms or repeat rules, ignoring their order."""
     encoded = sorted(json.dumps(asdict(item), sort_keys=True, default=str) for item in items)
     return hashlib.sha256(json.dumps(encoded).encode()).hexdigest()[:16]
+
+
+# EventKit weekdays (1=Sunday … 7=Saturday) and their RRULE codes
+WEEKDAY_CODES = {1: "SU", 2: "MO", 3: "TU", 4: "WE", 5: "TH", 6: "FR", 7: "SA"}
 
 
 def setup_sync_file_logging(log_dir: Path) -> logging.FileHandler:
@@ -1191,16 +1196,12 @@ class RemindersSyncEngine:
             }
             frequency = frequency_map.get(rule.frequency.lower(), "DAILY")
 
-            # Convert days of week if present
-            by_day = None
-            if rule.days_of_week:
-                # EventKit uses 1=Sunday, 2=Monday, etc.
-                # CalDAV uses SU, MO, TU, WE, TH, FR, SA
-                day_map = {1: "SU", 2: "MO", 3: "TU", 4: "WE", 5: "TH", 6: "FR", 7: "SA"}
-                by_day = [day_map[day] for day in rule.days_of_week if day in day_map]
-
-            # Convert days of month if present
-            by_month_day = rule.days_of_month if rule.days_of_month else None
+            # Days of week, with their position if any: (3, 2) is 2TU, the second Tuesday
+            by_day = [
+                f"{position or ''}{WEEKDAY_CODES[day]}"
+                for day, position in rule.days_of_week or []
+                if day in WEEKDAY_CODES
+            ]
 
             caldav_rules.append(
                 CalDAVRecurrence(
@@ -1208,8 +1209,12 @@ class RemindersSyncEngine:
                     interval=rule.interval,
                     count=rule.occurrence_count,
                     until=rule.end_date,
-                    by_day=by_day,
-                    by_month_day=by_month_day,
+                    by_day=by_day or None,
+                    by_month_day=rule.days_of_month or None,
+                    by_month=rule.months_of_year or None,
+                    by_week_no=rule.weeks_of_year or None,
+                    by_year_day=rule.days_of_year or None,
+                    by_set_pos=rule.set_positions or None,
                 )
             )
         return caldav_rules
@@ -1236,16 +1241,13 @@ class RemindersSyncEngine:
             if frequency not in RECURRENCE_FREQUENCIES:
                 frequency = "DAILY"
 
-            # Convert days of week if present
-            days_of_week = None
-            if rule.by_day:
-                # CalDAV uses SU, MO, TU, WE, TH, FR, SA
-                # EventKit uses 1=Sunday, 2=Monday, etc.
-                day_map = {"SU": 1, "MO": 2, "TU": 3, "WE": 4, "TH": 5, "FR": 6, "SA": 7}
-                days_of_week = [day_map[day] for day in rule.by_day if day in day_map]
-
-            # Convert days of month if present
-            days_of_month = rule.by_month_day if rule.by_month_day else None
+            # Days of week, with their position if any: 2TU is (3, 2), the second Tuesday
+            weekdays = {code: day for day, code in WEEKDAY_CODES.items()}
+            days_of_week = []
+            for by_day in rule.by_day or []:
+                match = re.fullmatch(r"([+-]?\d+)?([A-Z]{2})", by_day.upper())
+                if match and match.group(2) in weekdays:
+                    days_of_week.append((weekdays[match.group(2)], int(match.group(1) or 0)))
 
             eventkit_rules.append(
                 ReminderRecurrence(
@@ -1254,7 +1256,11 @@ class RemindersSyncEngine:
                     occurrence_count=rule.count,
                     end_date=rule.until,
                     days_of_week=days_of_week,
-                    days_of_month=days_of_month,
+                    days_of_month=rule.by_month_day or None,
+                    months_of_year=rule.by_month or None,
+                    weeks_of_year=rule.by_week_no or None,
+                    days_of_year=rule.by_year_day or None,
+                    set_positions=rule.by_set_pos or None,
                 )
             )
         return eventkit_rules

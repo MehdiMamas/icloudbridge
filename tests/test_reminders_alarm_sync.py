@@ -129,9 +129,7 @@ async def test_caldav_recurrence_edit_is_applied(tmp_path):
 
     [(_, fields)] = reminders.updates
     assert fields["alarms"] is None
-    assert fields["recurrence_rules"] == [
-        ReminderRecurrence(frequency="WEEKLY", interval=2, days_of_week=None)
-    ]
+    assert fields["recurrence_rules"] == [ReminderRecurrence(frequency="WEEKLY", interval=2)]
 
 
 async def test_apple_title_edit_leaves_caldav_alarms_and_recurrence_alone(tmp_path):
@@ -212,9 +210,9 @@ async def test_fingerprints_change_only_with_their_version(tmp_path):
     engine, _, _ = await make_engine(tmp_path, [], [])
 
     assert engine._sync_fingerprints(APPLE, CALDAV) == {
-        "version": 2,
-        "apple": {"alarms": "38fe450b0b3810f2", "recurrence": "a82d7bec1dd50ba7"},
-        "caldav": {"alarms": "f7a650dccae223fe", "recurrence": "5f92bc01c870d826"},
+        "version": 3,
+        "apple": {"alarms": "38fe450b0b3810f2", "recurrence": "b1206d2c1ab9ea49"},
+        "caldav": {"alarms": "f7a650dccae223fe", "recurrence": "e3620dd34bf8ec05"},
     }
 
 

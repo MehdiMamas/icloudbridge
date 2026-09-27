@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A due time with no time zone was treated as UTC, in both directions. It's now taken as your Mac's local time.
 - When you changed a reminder's alarms in Apple Reminders, iCloudBridge replaced every alarm on the task on your CalDAV server. Alarms it doesn't sync, such as location alarms saved by an Apple device, were deleted. The alarms it rewrote lost settings other apps had given them, such as playing a sound. It now only removes the alarms you deleted and adds the ones you added (#28).
 - Location alarms saved on your CalDAV server by an Apple device, and alarms set to do nothing, arrived in Apple Reminders as alarms set decades in the past. They're now left out.
+- Repeats lost everything except how often they repeat and on which weekdays. A reminder repeating on the 1st and 15th, on the last day of the month, on the last weekday, or only in certain months became a plain monthly or yearly repeat on the other side. A repeat on the second Tuesday became every Tuesday. Repeats now sync in full, both ways. A reminder whose repeat was already simplified keeps it, so set its repeat again (#22, #27).
 
 ## [0.3.1] - 2026-09-26
 

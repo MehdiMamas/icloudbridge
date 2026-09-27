@@ -37,8 +37,12 @@ class CalDAVRecurrence:
     interval: int  # Every N days/weeks/months/years
     count: int | None  # Number of occurrences (None = infinite)
     until: datetime | None  # End date (None = infinite)
-    by_day: list[str] | None  # Days of week (MO, TU, WE, TH, FR, SA, SU)
-    by_month_day: list[int] | None  # Days of month (1-31)
+    by_day: list[str] | None  # Days of week, optionally with a position: MO, 2TU, -1FR
+    by_month_day: list[int] | None  # Days of month (1-31, negative counts from the end)
+    by_month: list[int] | None = None  # Months (1-12)
+    by_week_no: list[int] | None = None  # Weeks of the year
+    by_year_day: list[int] | None = None  # Days of the year
+    by_set_pos: list[int] | None = None  # Which of the matching days to use, e.g. -1 = last
 
 
 @dataclass
@@ -154,6 +158,34 @@ def _update_valarms(vtodo: VTodo, alarms: list[CalDAVAlarm]) -> None:
     vtodo.subcomponents = kept
     for alarm in missing:
         vtodo.add_component(_valarm(alarm, vtodo.get("SUMMARY", "")))
+
+
+def _rrule_ints(rrule, part: str) -> list[int] | None:
+    """An RRULE part's values as ints, or None if the rule doesn't have it."""
+    values = rrule.get(part)
+    if not values:
+        return None
+    return [int(value) for value in (values if isinstance(values, list) else [values])]
+
+
+def _rrule(rule: CalDAVRecurrence) -> dict:
+    """The RRULE parts for a recurrence rule."""
+    rrule = {"FREQ": [rule.frequency], "INTERVAL": [rule.interval]}
+    if rule.count is not None:
+        rrule["COUNT"] = [rule.count]
+    if rule.until is not None:
+        rrule["UNTIL"] = [rule.until]
+    for part, values in [
+        ("BYDAY", rule.by_day),
+        ("BYMONTHDAY", rule.by_month_day),
+        ("BYMONTH", rule.by_month),
+        ("BYWEEKNO", rule.by_week_no),
+        ("BYYEARDAY", rule.by_year_day),
+        ("BYSETPOS", rule.by_set_pos),
+    ]:
+        if values:
+            rrule[part] = values
+    return rrule
 
 
 class CalDAVAdapter:
@@ -543,12 +575,6 @@ class CalDAVAdapter:
                 else:
                     by_day = None
 
-                by_month_day = rrule.get("BYMONTHDAY")
-                if by_month_day:
-                    by_month_day = [int(d) for d in by_month_day] if isinstance(by_month_day, list) else [int(by_month_day)]
-                else:
-                    by_month_day = None
-
                 if freq:
                     recurrence_rules.append(
                         CalDAVRecurrence(
@@ -557,7 +583,11 @@ class CalDAVAdapter:
                             count=count,
                             until=until,
                             by_day=by_day,
-                            by_month_day=by_month_day,
+                            by_month_day=_rrule_ints(rrule, "BYMONTHDAY"),
+                            by_month=_rrule_ints(rrule, "BYMONTH"),
+                            by_week_no=_rrule_ints(rrule, "BYWEEKNO"),
+                            by_year_day=_rrule_ints(rrule, "BYYEARDAY"),
+                            by_set_pos=_rrule_ints(rrule, "BYSETPOS"),
                         )
                     )
 
@@ -699,16 +729,7 @@ class CalDAVAdapter:
         # Add recurrence rules
         if recurrence_rules:
             for rule in recurrence_rules:
-                rrule_dict = {"FREQ": [rule.frequency], "INTERVAL": [rule.interval]}
-                if rule.count is not None:
-                    rrule_dict["COUNT"] = [rule.count]
-                if rule.until is not None:
-                    rrule_dict["UNTIL"] = [rule.until]
-                if rule.by_day:
-                    rrule_dict["BYDAY"] = rule.by_day
-                if rule.by_month_day:
-                    rrule_dict["BYMONTHDAY"] = rule.by_month_day
-                todo.add("rrule", rrule_dict)
+                todo.add("rrule", _rrule(rule))
 
         cal.add_component(todo)
 
@@ -883,16 +904,7 @@ class CalDAVAdapter:
                     del vtodo["RRULE"]
                 # Add new RRULEs
                 for rule in recurrence_rules:
-                    rrule_dict = {"FREQ": [rule.frequency], "INTERVAL": [rule.interval]}
-                    if rule.count is not None:
-                        rrule_dict["COUNT"] = [rule.count]
-                    if rule.until is not None:
-                        rrule_dict["UNTIL"] = [rule.until]
-                    if rule.by_day:
-                        rrule_dict["BYDAY"] = rule.by_day
-                    if rule.by_month_day:
-                        rrule_dict["BYMONTHDAY"] = rule.by_month_day
-                    vtodo.add("rrule", rrule_dict)
+                    vtodo.add("rrule", _rrule(rule))
 
             # Always set required timestamp fields with proper datetime objects
             # Use provided timestamp or default to now
