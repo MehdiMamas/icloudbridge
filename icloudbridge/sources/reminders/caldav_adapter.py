@@ -77,6 +77,85 @@ def _valarm(alarm: CalDAVAlarm, description: str) -> Alarm:
     return valarm
 
 
+def _alarm_start(vtodo: VTodo) -> datetime | None:
+    """A task's DTSTART as an aware datetime, which relative alarms may count from."""
+    dtstart = vtodo.get("DTSTART")
+    start = dtstart.dt if dtstart is not None and hasattr(dtstart, "dt") else None
+    if not isinstance(start, datetime):
+        return None
+    # A time with no time zone (floating) is local time
+    return start if start.tzinfo else start.replace(tzinfo=local_timezone())
+
+
+def _alarm_from_valarm(valarm: Alarm, start: datetime | None) -> CalDAVAlarm | None:
+    """
+    Read a VALARM, or return None for one iCloudBridge doesn't sync: a location alarm,
+    one that does nothing (ACTION:NONE), or one without a trigger it can read.
+    """
+    # Location alarms aren't synced. Apple gives them a placeholder trigger in 1976.
+    if "PROXIMITY" in valarm or "X-APPLE-PROXIMITY" in valarm:
+        return None
+    if str(valarm.get("ACTION", "")).upper() == "NONE":
+        return None
+
+    trigger = valarm.get("TRIGGER")
+    if not trigger:
+        return None
+    trigger_val = trigger.dt if hasattr(trigger, "dt") else None
+    related_to_end = str(trigger.params.get("RELATED", "")).upper() == "END"
+    if isinstance(trigger_val, timedelta):
+        # Relative duration (e.g. -PT15M), negative = before. RELATED=END is the due
+        # date; START, the default, is DTSTART. Without a DTSTART, as iCloudBridge used
+        # to write them, use the due date.
+        if not related_to_end and start is not None:
+            return CalDAVAlarm(trigger_date=_as_utc(start + trigger_val))
+        return CalDAVAlarm(trigger_minutes=int(-trigger_val.total_seconds() / 60))
+    if isinstance(trigger_val, datetime):
+        # Fixed time
+        return CalDAVAlarm(trigger_date=_as_utc(trigger_val))
+
+    # Fallback: parse from string representation
+    trigger_str = str(trigger)
+    if trigger_str.startswith("-PT") or trigger_str.startswith("PT"):
+        is_before = trigger_str.startswith("-PT")
+        trigger_str = trigger_str.replace("-PT", "").replace("PT", "")
+
+        minutes = 0
+        if "H" in trigger_str:
+            hours_str = trigger_str.split("H")[0]
+            minutes += int(hours_str) * 60
+            trigger_str = trigger_str.split("H")[1] if "H" in trigger_str else ""
+        if "M" in trigger_str:
+            minutes_str = trigger_str.split("M")[0]
+            minutes += int(minutes_str)
+
+        return CalDAVAlarm(trigger_minutes=minutes if is_before else -minutes)
+    return None
+
+
+def _update_valarms(vtodo: VTodo, alarms: list[CalDAVAlarm]) -> None:
+    """
+    Make a task's alarms match the given ones.
+
+    VALARMs that already match are kept as they are, with whatever else they hold.
+    Only those whose alarm is gone are removed, and missing ones are added. VALARMs
+    iCloudBridge doesn't sync, such as location alarms, are left alone.
+    """
+    start = _alarm_start(vtodo)
+    missing = list(alarms)
+    kept = []
+    for component in vtodo.subcomponents:
+        existing = _alarm_from_valarm(component, start) if component.name == "VALARM" else None
+        if existing is None:
+            kept.append(component)
+        elif existing in missing:
+            missing.remove(existing)
+            kept.append(component)
+    vtodo.subcomponents = kept
+    for alarm in missing:
+        vtodo.add_component(_valarm(alarm, vtodo.get("SUMMARY", "")))
+
+
 class CalDAVAdapter:
     """Adapter for syncing reminders with CalDAV servers."""
 
@@ -432,48 +511,12 @@ class CalDAVAdapter:
             url = str(url_field) if url_field else None
 
             # Parse alarms (VALARM components)
-            dtstart = vtodo.get("DTSTART")
-            start = dtstart.dt if dtstart is not None and hasattr(dtstart, "dt") else None
-            if isinstance(start, datetime) and not start.tzinfo:
-                start = start.replace(tzinfo=local_timezone())
+            start = _alarm_start(vtodo)
             alarms = []
-            for component in vtodo.walk():
-                if component.name == "VALARM":
-                    trigger = component.get("TRIGGER")
-                    if trigger:
-                        trigger_val = trigger.dt if hasattr(trigger, "dt") else None
-                        related_to_end = str(trigger.params.get("RELATED", "")).upper() == "END"
-                        if isinstance(trigger_val, timedelta):
-                            # Relative duration (e.g. -PT15M), negative = before. RELATED=END
-                            # is the due date; START, the default, is DTSTART. Without a
-                            # DTSTART, as iCloudBridge used to write them, use the due date.
-                            if not related_to_end and isinstance(start, datetime):
-                                trigger_date = _as_utc(start + trigger_val)
-                                alarms.append(CalDAVAlarm(trigger_date=trigger_date))
-                            else:
-                                trigger_minutes = int(-trigger_val.total_seconds() / 60)
-                                alarms.append(CalDAVAlarm(trigger_minutes=trigger_minutes))
-                        elif isinstance(trigger_val, datetime):
-                            # Fixed time
-                            alarms.append(CalDAVAlarm(trigger_date=_as_utc(trigger_val)))
-                        else:
-                            # Fallback: parse from string representation
-                            trigger_str = str(trigger)
-                            if trigger_str.startswith("-PT") or trigger_str.startswith("PT"):
-                                is_before = trigger_str.startswith("-PT")
-                                trigger_str = trigger_str.replace("-PT", "").replace("PT", "")
-
-                                minutes = 0
-                                if "H" in trigger_str:
-                                    hours_str = trigger_str.split("H")[0]
-                                    minutes += int(hours_str) * 60
-                                    trigger_str = trigger_str.split("H")[1] if "H" in trigger_str else ""
-                                if "M" in trigger_str:
-                                    minutes_str = trigger_str.split("M")[0]
-                                    minutes += int(minutes_str)
-
-                                trigger_minutes = minutes if is_before else -minutes
-                                alarms.append(CalDAVAlarm(trigger_minutes=trigger_minutes))
+            for component in vtodo.walk("VALARM"):
+                alarm = _alarm_from_valarm(component, start)
+                if alarm is not None:
+                    alarms.append(alarm)
 
             # Normalize to an empty list when none were present (defensive against None downstream)
             alarms = alarms or []
@@ -714,7 +757,8 @@ class CalDAVAdapter:
             priority: New priority (if provided)
             due_date: New due date (if provided)
             url: New URL (if provided)
-            alarms: New list of alarms (if provided, replaces existing)
+            alarms: The alarms the task should have (if provided; VALARMs that already
+                match, and ones iCloudBridge doesn't sync, are kept as they are)
             recurrence_rules: New list of recurrence rules (if provided, replaces existing)
             modification_date: Last modification date (defaults to now if not provided)
 
@@ -828,13 +872,9 @@ class CalDAVAdapter:
             if url is not None:
                 vtodo["URL"] = url
 
-            # Update alarms (replace all existing alarms)
+            # Update alarms, keeping the VALARMs that still match and any it doesn't sync
             if alarms is not None:
-                # Remove existing alarms
-                vtodo.subcomponents = [c for c in vtodo.subcomponents if c.name != "VALARM"]
-                # Add new alarms
-                for alarm in alarms:
-                    vtodo.add_component(_valarm(alarm, vtodo.get("SUMMARY", "")))
+                _update_valarms(vtodo, alarms)
 
             # Update recurrence rules (replace existing)
             if recurrence_rules is not None:

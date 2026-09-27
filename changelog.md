@@ -15,6 +15,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Editing a reminder on your CalDAV server moved its due time in Apple Reminders by your time zone's difference from UTC. In the UK in summer, a reminder due at 10:00 came back due at 09:00, and each later edit on the server could move it again. Due times now keep their time. Reminders that already moved stay where they are, so check the due times of reminders you've edited on the server (#30).
 - A reminder due on the other side of a daylight saving change reached your CalDAV server an hour out. In the UK in summer, a reminder due at 10:00 in December arrived as 09:00.
 - A due time with no time zone was treated as UTC, in both directions. It's now taken as your Mac's local time.
+- When you changed a reminder's alarms in Apple Reminders, iCloudBridge replaced every alarm on the task on your CalDAV server. Alarms it doesn't sync, such as location alarms saved by an Apple device, were deleted. The alarms it rewrote lost settings other apps had given them, such as playing a sound. It now only removes the alarms you deleted and adds the ones you added (#28).
+- Location alarms saved on your CalDAV server by an Apple device, and alarms set to do nothing, arrived in Apple Reminders as alarms set decades in the past. They're now left out.
 
 ## [0.3.1] - 2026-09-26
 
