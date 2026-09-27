@@ -1,6 +1,8 @@
-"""Stand-ins for Apple Reminders and a CalDAV server, holding lists only."""
+"""Stand-ins for Apple Reminders and a CalDAV server, holding lists and their items."""
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import datetime, timezone
 from itertools import count
 from types import SimpleNamespace
 
@@ -16,6 +18,8 @@ class FakeReminders:
         self.sources: set[str] = set()
         self.created: list[str] = []
         self.deleted: list[str] = []
+        self.reminders: dict[str, list] = {}  # EventKitReminders by list title
+        self.updates: list[tuple[str, dict]] = []
         self._ids = count(1)
         for title in lists:
             self.add(title, source)
@@ -51,7 +55,20 @@ class FakeReminders:
         return calendar is not None
 
     async def get_reminders(self, calendar_name: str | None = None):
-        return []
+        return list(self.reminders.get(calendar_name, []))
+
+    async def update_reminder(self, uuid: str, **fields):
+        """Record the update and apply the fields it sets."""
+        self.updates.append((uuid, fields))
+        changes = {name: value for name, value in fields.items() if value is not None}
+        for reminders in self.reminders.values():
+            for i, reminder in enumerate(reminders):
+                if reminder.uuid == uuid:
+                    reminders[i] = replace(
+                        reminder, **changes, modification_date=datetime.now(timezone.utc)
+                    )
+                    return reminders[i]
+        raise ValueError(f"Reminder not found: {uuid}")
 
 
 class FakeCalDAV:
@@ -61,6 +78,8 @@ class FakeCalDAV:
         self.names: dict[str, str] = {}
         self.created: list[str] = []
         self.deleted: list[str] = []
+        self.todos: dict[str, list] = {}  # CalDAVReminders by calendar name
+        self.updates: list[tuple[str, dict]] = []
         for name in calendars:
             self._add(name)
 
@@ -101,7 +120,19 @@ class FakeCalDAV:
         return name is not None
 
     async def get_todos(self, calendar_name: str | None = None):
-        return []
+        return list(self.todos.get(calendar_name, []))
+
+    async def update_todo(self, caldav_url: str, modification_date=None, **fields):
+        """Record the update and apply the fields it sets."""
+        self.updates.append((caldav_url, fields))
+        changes = {name: value for name, value in fields.items() if value is not None}
+        for todos in self.todos.values():
+            for i, todo in enumerate(todos):
+                if todo.caldav_url == caldav_url:
+                    modified = modification_date or datetime.now(timezone.utc)
+                    todos[i] = replace(todo, **changes, last_modified=modified)
+                    return todos[i]
+        return None
 
 
 async def make_engine(tmp_path, apple_lists, caldav_calendars, **engine_options):

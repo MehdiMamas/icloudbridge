@@ -1,6 +1,9 @@
 """Core synchronization logic for Apple Reminders ↔ CalDAV."""
 
+import hashlib
+import json
 import logging
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,6 +26,18 @@ from icloudbridge.utils.db import RemindersDB
 from icloudbridge.utils.exceptions import SourceUnavailableError
 
 logger = logging.getLogger(__name__)
+
+# Version of the alarm and repeat rule fingerprints stored with each mapping. Bump it
+# whenever a conversion changes what a side's alarms or repeat rules sync as. Older
+# fingerprints then count as missing, so the next sync records new ones instead of
+# taking the difference for an edit.
+FINGERPRINT_VERSION = 1
+
+
+def _fingerprint(items: list) -> str:
+    """Short hash of a list of alarms or repeat rules, ignoring their order."""
+    encoded = sorted(json.dumps(asdict(item), sort_keys=True, default=str) for item in items)
+    return hashlib.sha256(json.dumps(encoded).encode()).hexdigest()[:16]
 
 
 def setup_sync_file_logging(log_dir: Path) -> logging.FileHandler:
@@ -420,6 +435,7 @@ class RemindersSyncEngine:
                 effective_caldav_name,
                 local_by_uuid,
                 remote_by_uid,
+                db_mappings,
             )
             await self._record_list_pair(effective_apple_name, effective_caldav_name)
 
@@ -692,6 +708,7 @@ class RemindersSyncEngine:
         caldav_calendar_name: str,
         local_by_uuid: dict[str, EventKitReminder],
         remote_by_uid: dict[str, CalDAVReminder],
+        db_mappings: dict[str, dict],
     ) -> dict[str, int]:
         """Execute the sync plan and update the database."""
         stats = {
@@ -751,6 +768,7 @@ class RemindersSyncEngine:
                     local_title=created.title,
                     remote_caldav_url=remote_todo.caldav_url,
                     last_sync=created.modification_date,
+                    sync_fingerprints=json.dumps(self._sync_fingerprints(created, remote_todo)),
                 )
 
                 stats["created_local"] += 1
@@ -798,6 +816,9 @@ class RemindersSyncEngine:
                         local_title=local_reminder.title,
                         remote_caldav_url=created.caldav_url,
                         last_sync=local_reminder.modification_date,
+                        sync_fingerprints=json.dumps(
+                            self._sync_fingerprints(local_reminder, created)
+                        ),
                     )
 
                     stats["created_remote"] += 1
@@ -822,9 +843,20 @@ class RemindersSyncEngine:
             try:
                 apple_priority = self._convert_priority_to_apple(remote_todo.priority)
 
-                # Convert alarms and recurrence rules
-                alarms = self._convert_alarms_to_eventkit(remote_todo.alarms)
-                recurrence_rules = self._convert_recurrence_to_eventkit(remote_todo.recurrence_rules)
+                # Only rewrite alarms and recurrence rules that changed on CalDAV since the
+                # last sync. Anything else, such as a new title, leaves them alone.
+                fingerprints = self._sync_fingerprints(local_reminder, remote_todo)
+                stored = self._stored_fingerprints(db_mappings.get(local_uuid))
+                alarms = None
+                if self._changed_since_sync(stored, fingerprints, "caldav", "alarms"):
+                    alarms = self._convert_alarms_to_eventkit(remote_todo.alarms)
+                    # CalDAV doesn't get fixed-time alarms yet (#25), so keep Apple's
+                    alarms += [alarm for alarm in local_reminder.alarms if alarm.trigger_date]
+                recurrence_rules = None
+                if self._changed_since_sync(stored, fingerprints, "caldav", "recurrence"):
+                    recurrence_rules = self._convert_recurrence_to_eventkit(
+                        remote_todo.recurrence_rules
+                    )
 
                 updated = await self.reminders_adapter.update_reminder(
                     uuid=local_uuid,
@@ -847,6 +879,7 @@ class RemindersSyncEngine:
                     remote_uid=remote_todo.uid,
                     remote_caldav_url=remote_todo.caldav_url,
                     last_sync=updated.modification_date,
+                    sync_fingerprints=json.dumps(self._sync_fingerprints(updated, remote_todo)),
                 )
 
                 stats["updated_local"] += 1
@@ -863,9 +896,18 @@ class RemindersSyncEngine:
             try:
                 caldav_priority = self._convert_priority_to_caldav(local_reminder.priority)
 
-                # Convert alarms and recurrence rules
-                alarms = self._convert_alarms_to_caldav(local_reminder.alarms)
-                recurrence_rules = self._convert_recurrence_to_caldav(local_reminder.recurrence_rules)
+                # Only rewrite alarms and recurrence rules that changed in Apple Reminders
+                # since the last sync
+                fingerprints = self._sync_fingerprints(local_reminder, remote_todo)
+                stored = self._stored_fingerprints(db_mappings.get(local_reminder.uuid))
+                alarms = None
+                if self._changed_since_sync(stored, fingerprints, "apple", "alarms"):
+                    alarms = self._convert_alarms_to_caldav(local_reminder.alarms)
+                recurrence_rules = None
+                if self._changed_since_sync(stored, fingerprints, "apple", "recurrence"):
+                    recurrence_rules = self._convert_recurrence_to_caldav(
+                        local_reminder.recurrence_rules
+                    )
 
                 updated = await self.caldav_adapter.update_todo(
                     caldav_url=remote_todo.caldav_url,
@@ -890,6 +932,9 @@ class RemindersSyncEngine:
                         remote_uid=remote_uid,
                         remote_caldav_url=updated.caldav_url,
                         last_sync=local_reminder.modification_date,
+                        sync_fingerprints=json.dumps(
+                            self._sync_fingerprints(local_reminder, updated)
+                        ),
                     )
 
                     stats["updated_remote"] += 1
@@ -919,6 +964,26 @@ class RemindersSyncEngine:
                 logger.error(msg)
                 error_messages.append(msg)
                 stats["errors"] += 1
+
+        # Unchanged pairs with no fingerprints (synced before they existed, or before
+        # FINGERPRINT_VERSION changed) get them now, so later edits to their alarms and
+        # recurrence rules are recognised
+        baseline = {}
+        for local_uuid in plan["unchanged"]:
+            mapping = db_mappings.get(local_uuid)
+            if mapping is None or self._stored_fingerprints(mapping) is not None:
+                continue
+            local_reminder = local_by_uuid.get(local_uuid)
+            remote_todo = remote_by_uid.get(mapping["remote_uid"])
+            if local_reminder and remote_todo:
+                baseline[local_uuid] = json.dumps(
+                    self._sync_fingerprints(local_reminder, remote_todo)
+                )
+        if baseline:
+            try:
+                await self.db.set_sync_fingerprints(baseline)
+            except Exception as e:
+                logger.warning(f"Could not record fingerprints for unchanged reminders: {e}")
 
         # Delete from Apple Reminders
         for local_uuid, local_reminder in plan["delete_local"]:
@@ -1008,6 +1073,50 @@ class RemindersSyncEngine:
             return apple_priority - 1
         else:
             return min(apple_priority - 1, 9)
+
+    def _sync_fingerprints(
+        self, local_reminder: EventKitReminder, remote_todo: CalDAVReminder
+    ) -> dict:
+        """
+        Fingerprint each side's alarms and recurrence rules, as they sync to the other side.
+
+        Stored with the mapping after each sync, so the next one can tell whether a side
+        changed them in the meantime.
+        """
+        return {
+            "version": FINGERPRINT_VERSION,
+            "apple": {
+                "alarms": _fingerprint(self._convert_alarms_to_caldav(local_reminder.alarms)),
+                "recurrence": _fingerprint(
+                    self._convert_recurrence_to_caldav(local_reminder.recurrence_rules)
+                ),
+            },
+            "caldav": {
+                "alarms": _fingerprint(self._convert_alarms_to_eventkit(remote_todo.alarms)),
+                "recurrence": _fingerprint(
+                    self._convert_recurrence_to_eventkit(remote_todo.recurrence_rules)
+                ),
+            },
+        }
+
+    @staticmethod
+    def _stored_fingerprints(mapping: dict | None) -> dict | None:
+        """A mapping's stored fingerprints, or None if it has none from this version."""
+        try:
+            stored = json.loads(mapping["sync_fingerprints"])
+        except (TypeError, KeyError, ValueError):
+            return None
+        return stored if stored.get("version") == FINGERPRINT_VERSION else None
+
+    @staticmethod
+    def _changed_since_sync(stored: dict | None, current: dict, side: str, field: str) -> bool:
+        """
+        Whether one side's alarms or recurrence rules changed since the pair last synced.
+
+        With nothing stored to compare with, this says no. The field is then left alone,
+        rather than overwritten from a side that may never have been sent it.
+        """
+        return stored is not None and stored[side][field] != current[side][field]
 
     def _convert_alarms_to_caldav(self, eventkit_alarms: list[ReminderAlarm]) -> list[CalDAVAlarm]:
         """

@@ -9,6 +9,7 @@ from typing import Any
 import EventKit
 from EventKit import (
     EKAlarm,
+    EKAlarmProximityNone,
     EKEntityTypeReminder,
     EKEventStore,
     EKRecurrenceDayOfWeek,
@@ -124,6 +125,31 @@ RECURRENCE_FREQUENCIES = {
     "MONTHLY": EKRecurrenceFrequencyMonthly,
     "YEARLY": EKRecurrenceFrequencyYearly,
 }
+
+
+def is_location_alarm(alarm: EKAlarm) -> bool:
+    """Whether an alarm fires on arriving at or leaving a place, rather than at a time."""
+    return alarm.structuredLocation() is not None or alarm.proximity() != EKAlarmProximityNone
+
+
+def alarm_from_eventkit(alarm: EKAlarm) -> ReminderAlarm:
+    """Read an EKAlarm. A location alarm has neither a trigger date nor an offset."""
+    if alarm.absoluteDate():
+        return ReminderAlarm(trigger_date=normalize_date(alarm.absoluteDate()))
+    if is_location_alarm(alarm):
+        return ReminderAlarm()
+    # An offset of 0 is an alarm at the due time, not a missing offset
+    return ReminderAlarm(relative_offset=int(alarm.relativeOffset()))
+
+
+def alarm_to_eventkit(alarm_data: ReminderAlarm) -> EKAlarm:
+    """Create the EKAlarm for a time-based alarm."""
+    alarm = EKAlarm.alloc().init()
+    if alarm_data.trigger_date is not None:
+        alarm.setAbsoluteDate_(alarm_data.trigger_date)
+    else:
+        alarm.setRelativeOffset_(alarm_data.relative_offset or 0)
+    return alarm
 
 
 @dataclass
@@ -570,13 +596,7 @@ class RemindersAdapter:
         # Extract alarms
         alarms = []
         if ek_reminder.hasAlarms():
-            for alarm in ek_reminder.alarms() or []:
-                alarm_obj = ReminderAlarm()
-                if alarm.absoluteDate():
-                    alarm_obj.trigger_date = normalize_date(alarm.absoluteDate())
-                elif alarm.relativeOffset():
-                    alarm_obj.relative_offset = int(alarm.relativeOffset())
-                alarms.append(alarm_obj)
+            alarms = [alarm_from_eventkit(alarm) for alarm in ek_reminder.alarms() or []]
 
         # Extract recurrence rules
         recurrence_rules = []
@@ -719,12 +739,7 @@ class RemindersAdapter:
         # Add alarms
         if alarms:
             for alarm_data in alarms:
-                alarm = EKAlarm.alloc().init()
-                if alarm_data.trigger_date:
-                    alarm.setAbsoluteDate_(alarm_data.trigger_date)
-                elif alarm_data.relative_offset:
-                    alarm.setRelativeOffset_(alarm_data.relative_offset)
-                reminder.addAlarm_(alarm)
+                reminder.addAlarm_(alarm_to_eventkit(alarm_data))
 
         # Add recurrence rules
         if recurrence_rules:
@@ -792,6 +807,9 @@ class RemindersAdapter:
         """
         Update an existing reminder by UUID.
 
+        Fields left as None are not changed. alarms, when given, are the time-based
+        alarms the reminder should have; its location alarms are always kept.
+
         Returns:
             The updated EventKitReminder object
         """
@@ -855,19 +873,21 @@ class RemindersAdapter:
 
             reminder.setDueDateComponents_(components)
 
-        # Update alarms (replace all)
+        # Update alarms: keep the ones that match, remove the rest and add what's missing.
+        # Location alarms aren't synced, so they are never in the list and never removed.
         if alarms is not None:
-            # Remove existing alarms (alarms() can return None)
+            missing = list(alarms)
+            # alarms() can return None
             for alarm in reminder.alarms() or []:
-                reminder.removeAlarm_(alarm)
-            # Add new alarms
-            for alarm_data in alarms:
-                alarm = EKAlarm.alloc().init()
-                if alarm_data.trigger_date:
-                    alarm.setAbsoluteDate_(alarm_data.trigger_date)
-                elif alarm_data.relative_offset:
-                    alarm.setRelativeOffset_(alarm_data.relative_offset)
-                reminder.addAlarm_(alarm)
+                if is_location_alarm(alarm):
+                    continue
+                existing = alarm_from_eventkit(alarm)
+                if existing in missing:
+                    missing.remove(existing)
+                else:
+                    reminder.removeAlarm_(alarm)
+            for alarm_data in missing:
+                reminder.addAlarm_(alarm_to_eventkit(alarm_data))
 
         # Update recurrence rules (replace all)
         if recurrence_rules is not None:

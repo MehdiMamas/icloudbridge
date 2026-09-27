@@ -342,11 +342,20 @@ class RemindersDB:
                     local_title TEXT NOT NULL,
                     remote_caldav_url TEXT NOT NULL,
                     last_sync_timestamp REAL NOT NULL,
+                    sync_fingerprints TEXT,
                     UNIQUE(local_uuid),
                     UNIQUE(remote_uid)
                 )
                 """
             )
+
+            # Ensure sync_fingerprints column exists for pre-existing databases
+            db.row_factory = aiosqlite.Row
+            async with db.execute("PRAGMA table_info(reminder_mapping)") as cursor:
+                columns = {row["name"] for row in await cursor.fetchall()}
+            if "sync_fingerprints" not in columns:
+                await db.execute("ALTER TABLE reminder_mapping ADD COLUMN sync_fingerprints TEXT")
+                logger.debug("Added sync_fingerprints column to reminder_mapping table")
 
             # Create indexes for faster lookups
             await db.execute(
@@ -394,6 +403,7 @@ class RemindersDB:
         local_title: str,
         remote_caldav_url: str,
         last_sync: datetime,
+        sync_fingerprints: str | None = None,
     ) -> None:
         """
         Add or update a mapping between local reminder and remote TODO.
@@ -404,15 +414,24 @@ class RemindersDB:
             local_title: Title of the local reminder
             remote_caldav_url: CalDAV URL of the remote TODO
             last_sync: Timestamp of last sync
+            sync_fingerprints: Both sides' alarms and repeat rules as synced (opaque)
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """
                 INSERT OR REPLACE INTO reminder_mapping
-                (local_uuid, remote_uid, local_title, remote_caldav_url, last_sync_timestamp)
-                VALUES (?, ?, ?, ?, ?)
+                (local_uuid, remote_uid, local_title, remote_caldav_url, last_sync_timestamp,
+                 sync_fingerprints)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (local_uuid, remote_uid, local_title, remote_caldav_url, last_sync.timestamp()),
+                (
+                    local_uuid,
+                    remote_uid,
+                    local_title,
+                    remote_caldav_url,
+                    last_sync.timestamp(),
+                    sync_fingerprints,
+                ),
             )
             await db.commit()
             logger.debug(f"Added/updated reminder mapping: {local_uuid} <-> {remote_uid}")
@@ -482,6 +501,7 @@ class RemindersDB:
         remote_uid: str,
         remote_caldav_url: str,
         last_sync: datetime,
+        sync_fingerprints: str | None = None,
     ) -> None:
         """
         Update an existing mapping's timestamp and remote URL.
@@ -491,18 +511,35 @@ class RemindersDB:
             remote_uid: UID of the remote CalDAV TODO
             remote_caldav_url: CalDAV URL of the remote TODO
             last_sync: New timestamp for last sync
+            sync_fingerprints: New fingerprints (if provided; otherwise kept)
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """
                 UPDATE reminder_mapping
-                SET remote_uid = ?, remote_caldav_url = ?, last_sync_timestamp = ?
+                SET remote_uid = ?, remote_caldav_url = ?, last_sync_timestamp = ?,
+                    sync_fingerprints = COALESCE(?, sync_fingerprints)
                 WHERE local_uuid = ?
                 """,
-                (remote_uid, remote_caldav_url, last_sync.timestamp(), local_uuid),
+                (
+                    remote_uid,
+                    remote_caldav_url,
+                    last_sync.timestamp(),
+                    sync_fingerprints,
+                    local_uuid,
+                ),
             )
             await db.commit()
             logger.debug(f"Updated reminder mapping: {local_uuid} <-> {remote_uid}")
+
+    async def set_sync_fingerprints(self, fingerprints_by_uuid: dict[str, str]) -> None:
+        """Record mappings' fingerprints, keyed by local UUID, without changing anything else."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.executemany(
+                "UPDATE reminder_mapping SET sync_fingerprints = ? WHERE local_uuid = ?",
+                [(fingerprints, uuid) for uuid, fingerprints in fingerprints_by_uuid.items()],
+            )
+            await db.commit()
 
     async def delete_mapping(self, local_uuid: str | None = None, remote_uid: str | None = None) -> None:
         """

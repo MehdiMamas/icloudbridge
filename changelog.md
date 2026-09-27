@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - Repeating reminders that came from your CalDAV server turned into daily repeats in Apple Reminders. They kept their interval, so "every 2 weeks" became "every 2 days". This happened to reminders created on the server, and to any repeating reminder edited there, even if only its title changed. They now keep their daily, weekly, monthly or yearly repeat. A reminder that already changed to a daily repeat stays that way, so set its repeat again in Apple Reminders (#23).
+- Editing a reminder on your CalDAV server, even just its title, removed its alarms in Apple Reminders, including location alarms ("when I arrive"), and rewrote its repeat. Edits in Apple Reminders did the same to the alarms and repeat on the server. A sync now only changes a reminder's alarms or repeat when they were changed on the other side, and never removes location alarms, which aren't synced to CalDAV. The first sync after you update records each reminder's alarms and repeat without changing them, so an alarm or repeat you changed just before updating isn't carried over. Alarms that were already removed don't come back. Thanks to @r0ll3r for reporting this (#22, #24).
+- The alarm at a reminder's due time was never sent to your CalDAV server. It is now.
 
 ## [0.3.1] - 2026-09-26
 
