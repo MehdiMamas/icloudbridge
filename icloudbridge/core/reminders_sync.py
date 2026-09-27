@@ -11,6 +11,7 @@ from icloudbridge.sources.reminders.caldav_adapter import (
     CalDAVReminder,
 )
 from icloudbridge.sources.reminders.eventkit import (
+    RECURRENCE_FREQUENCIES,
     EventKitReminder,
     ReminderAlarm,
     ReminderCalendar,
@@ -1117,14 +1118,10 @@ class RemindersSyncEngine:
 
         eventkit_rules = []
         for rule in caldav_recurrence:
-            # Map CalDAV frequency to EventKit frequency
-            frequency_map = {
-                "DAILY": "daily",
-                "WEEKLY": "weekly",
-                "MONTHLY": "monthly",
-                "YEARLY": "yearly",
-            }
-            frequency = frequency_map.get(rule.frequency.upper(), "daily")
+            # ReminderRecurrence keeps the RRULE name; the EventKit adapter maps it
+            frequency = rule.frequency.upper()
+            if frequency not in RECURRENCE_FREQUENCIES:
+                frequency = "DAILY"
 
             # Convert days of week if present
             days_of_week = None

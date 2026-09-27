@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- Repeating reminders that came from your CalDAV server turned into daily repeats in Apple Reminders. They kept their interval, so "every 2 weeks" became "every 2 days". This happened to reminders created on the server, and to any repeating reminder edited there, even if only its title changed. They now keep their daily, weekly, monthly or yearly repeat. A reminder that already changed to a daily repeat stays that way, so set its repeat again in Apple Reminders (#23).
+
 ## [0.3.1] - 2026-09-26
 
 ### Fixed

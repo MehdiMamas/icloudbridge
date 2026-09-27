@@ -117,6 +117,15 @@ class ReminderRecurrence:
     days_of_month: list[int] | None = None  # Days of month (1-31) for monthly recurrence
 
 
+# ReminderRecurrence.frequency values (the RRULE FREQ names) and their EventKit frequencies
+RECURRENCE_FREQUENCIES = {
+    "DAILY": EKRecurrenceFrequencyDaily,
+    "WEEKLY": EKRecurrenceFrequencyWeekly,
+    "MONTHLY": EKRecurrenceFrequencyMonthly,
+    "YEARLY": EKRecurrenceFrequencyYearly,
+}
+
+
 @dataclass
 class EventKitReminder:
     """Represents a reminder from Apple Reminders.app via EventKit."""
@@ -720,13 +729,9 @@ class RemindersAdapter:
         # Add recurrence rules
         if recurrence_rules:
             for rec_data in recurrence_rules:
-                freq_map = {
-                    "DAILY": EKRecurrenceFrequencyDaily,
-                    "WEEKLY": EKRecurrenceFrequencyWeekly,
-                    "MONTHLY": EKRecurrenceFrequencyMonthly,
-                    "YEARLY": EKRecurrenceFrequencyYearly,
-                }
-                frequency = freq_map.get(rec_data.frequency, EKRecurrenceFrequencyDaily)
+                frequency = RECURRENCE_FREQUENCIES.get(
+                    rec_data.frequency, EKRecurrenceFrequencyDaily
+                )
 
                 # Create recurrence end
                 rec_end = None
@@ -871,13 +876,9 @@ class RemindersAdapter:
                 reminder.removeRecurrenceRule_(rule)
             # Add new rules
             for rec_data in recurrence_rules:
-                freq_map = {
-                    "DAILY": EKRecurrenceFrequencyDaily,
-                    "WEEKLY": EKRecurrenceFrequencyWeekly,
-                    "MONTHLY": EKRecurrenceFrequencyMonthly,
-                    "YEARLY": EKRecurrenceFrequencyYearly,
-                }
-                frequency = freq_map.get(rec_data.frequency, EKRecurrenceFrequencyDaily)
+                frequency = RECURRENCE_FREQUENCIES.get(
+                    rec_data.frequency, EKRecurrenceFrequencyDaily
+                )
 
                 rec_end = None
                 if rec_data.end_date:
