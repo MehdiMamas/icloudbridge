@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # whenever a conversion changes what a side's alarms or repeat rules sync as. Older
 # fingerprints then count as missing, so the next sync records new ones instead of
 # taking the difference for an edit.
-FINGERPRINT_VERSION = 1
+FINGERPRINT_VERSION = 2
 
 
 def _fingerprint(items: list) -> str:
@@ -850,8 +850,6 @@ class RemindersSyncEngine:
                 alarms = None
                 if self._changed_since_sync(stored, fingerprints, "caldav", "alarms"):
                     alarms = self._convert_alarms_to_eventkit(remote_todo.alarms)
-                    # CalDAV doesn't get fixed-time alarms yet (#25), so keep Apple's
-                    alarms += [alarm for alarm in local_reminder.alarms if alarm.trigger_date]
                 recurrence_rules = None
                 if self._changed_since_sync(stored, fingerprints, "caldav", "recurrence"):
                     recurrence_rules = self._convert_recurrence_to_eventkit(
@@ -1133,11 +1131,14 @@ class RemindersSyncEngine:
 
         caldav_alarms = []
         for alarm in eventkit_alarms:
-            # EventKit alarm relative_offset is in seconds, negative = before due date
-            # CalDAV alarm trigger_minutes is positive = before due date
-            if alarm.relative_offset is not None:
+            if alarm.trigger_date is not None:
+                caldav_alarms.append(CalDAVAlarm(trigger_date=alarm.trigger_date))
+            elif alarm.relative_offset is not None:
+                # EventKit alarm relative_offset is in seconds, negative = before due date
+                # CalDAV alarm trigger_minutes is positive = before due date
                 trigger_minutes = int(-alarm.relative_offset / 60)
                 caldav_alarms.append(CalDAVAlarm(trigger_minutes=trigger_minutes))
+            # Location alarms have neither and aren't synced
         return caldav_alarms
 
     def _convert_alarms_to_eventkit(self, caldav_alarms: list[CalDAVAlarm]) -> list[ReminderAlarm]:
@@ -1155,9 +1156,12 @@ class RemindersSyncEngine:
 
         eventkit_alarms = []
         for alarm in caldav_alarms:
+            if alarm.trigger_date is not None:
+                eventkit_alarms.append(ReminderAlarm(trigger_date=alarm.trigger_date))
+                continue
             # CalDAV alarm trigger_minutes is positive = before due date
             # EventKit alarm relative_offset is in seconds, negative = before due date
-            relative_offset = -alarm.trigger_minutes * 60
+            relative_offset = -(alarm.trigger_minutes or 0) * 60
             eventkit_alarms.append(ReminderAlarm(relative_offset=relative_offset))
         return eventkit_alarms
 

@@ -14,11 +14,17 @@ from icalendar import Todo as VTodo
 logger = logging.getLogger(__name__)
 
 
+def _as_utc(dt: datetime) -> datetime:
+    """A datetime in UTC, taking one without a timezone to be UTC already."""
+    return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 @dataclass
 class CalDAVAlarm:
-    """Represents a VALARM component in CalDAV."""
+    """Represents a VALARM component in CalDAV: at a fixed time, or relative to the due date."""
 
-    trigger_minutes: int  # Minutes before due date (positive = before, negative = after)
+    trigger_minutes: int | None = None  # Minutes before due date (positive = before, negative = after)
+    trigger_date: datetime | None = None  # Fixed time, instead of trigger_minutes
 
 
 @dataclass
@@ -52,6 +58,21 @@ class CalDAVReminder:
     alarms: list[CalDAVAlarm]  # List of alarms
     recurrence_rules: list[CalDAVRecurrence]  # List of recurrence rules
     is_all_day: bool = False  # True if due date is a DATE (not DATE-TIME)
+
+
+def _valarm(alarm: CalDAVAlarm, description: str) -> Alarm:
+    """Build the VALARM for an alarm."""
+    valarm = Alarm()
+    valarm.add("action", "DISPLAY")
+    valarm.add("description", description)
+    if alarm.trigger_date is not None:
+        trigger_date = _as_utc(alarm.trigger_date).replace(microsecond=0)
+        valarm.add("trigger", trigger_date, parameters={"VALUE": "DATE-TIME"})
+    else:
+        # Minutes before the due date are a negative duration relative to DUE
+        trigger = timedelta(minutes=-(alarm.trigger_minutes or 0))
+        valarm.add("trigger", trigger, parameters={"RELATED": "END"})
+    return valarm
 
 
 class CalDAVAdapter:
@@ -409,23 +430,28 @@ class CalDAVAdapter:
             url = str(url_field) if url_field else None
 
             # Parse alarms (VALARM components)
+            dtstart = vtodo.get("DTSTART")
+            start = dtstart.dt if dtstart is not None and hasattr(dtstart, "dt") else None
             alarms = []
             for component in vtodo.walk():
                 if component.name == "VALARM":
                     trigger = component.get("TRIGGER")
                     if trigger:
                         trigger_val = trigger.dt if hasattr(trigger, "dt") else None
+                        related_to_end = str(trigger.params.get("RELATED", "")).upper() == "END"
                         if isinstance(trigger_val, timedelta):
-                            # Relative duration (e.g., -PT15M)
-                            # Negative timedelta = before due date
-                            trigger_minutes = int(abs(trigger_val.total_seconds()) / 60)
-                            alarms.append(CalDAVAlarm(trigger_minutes=trigger_minutes))
-                        elif isinstance(trigger_val, datetime):
-                            # Absolute time - convert to relative minutes from due date
-                            if due_date:
-                                delta = due_date - trigger_val
-                                trigger_minutes = int(delta.total_seconds() / 60)
+                            # Relative duration (e.g. -PT15M), negative = before. RELATED=END
+                            # is the due date; START, the default, is DTSTART. Without a
+                            # DTSTART, as iCloudBridge used to write them, use the due date.
+                            if not related_to_end and isinstance(start, datetime):
+                                trigger_date = _as_utc(start + trigger_val)
+                                alarms.append(CalDAVAlarm(trigger_date=trigger_date))
+                            else:
+                                trigger_minutes = int(-trigger_val.total_seconds() / 60)
                                 alarms.append(CalDAVAlarm(trigger_minutes=trigger_minutes))
+                        elif isinstance(trigger_val, datetime):
+                            # Fixed time
+                            alarms.append(CalDAVAlarm(trigger_date=_as_utc(trigger_val)))
                         else:
                             # Fallback: parse from string representation
                             trigger_str = str(trigger)
@@ -621,17 +647,7 @@ class CalDAVAdapter:
         # Add alarms
         if alarms:
             for alarm in alarms:
-                valarm = Alarm()
-                valarm.add("action", "DISPLAY")
-                valarm.add("description", summary)
-                # Convert trigger_minutes to duration format
-                # Positive = before due date, negative = after
-                if alarm.trigger_minutes >= 0:
-                    trigger_duration = timedelta(minutes=-alarm.trigger_minutes)
-                else:
-                    trigger_duration = timedelta(minutes=abs(alarm.trigger_minutes))
-                valarm.add("trigger", trigger_duration)
-                todo.add_component(valarm)
+                todo.add_component(_valarm(alarm, summary))
 
         # Add recurrence rules
         if recurrence_rules:
@@ -814,16 +830,7 @@ class CalDAVAdapter:
                 vtodo.subcomponents = [c for c in vtodo.subcomponents if c.name != "VALARM"]
                 # Add new alarms
                 for alarm in alarms:
-                    valarm = Alarm()
-                    valarm.add("action", "DISPLAY")
-                    valarm.add("description", vtodo.get("SUMMARY", ""))
-                    # Convert trigger_minutes to duration format
-                    if alarm.trigger_minutes >= 0:
-                        trigger_duration = timedelta(minutes=-alarm.trigger_minutes)
-                    else:
-                        trigger_duration = timedelta(minutes=abs(alarm.trigger_minutes))
-                    valarm.add("trigger", trigger_duration)
-                    vtodo.add_component(valarm)
+                    vtodo.add_component(_valarm(alarm, vtodo.get("SUMMARY", "")))
 
             # Update recurrence rules (replace existing)
             if recurrence_rules is not None:

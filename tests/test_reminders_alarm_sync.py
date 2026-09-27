@@ -61,7 +61,11 @@ CALDAV = CalDAVReminder(
     url=None,
     caldav_url="https://dav.example.com/calendars/me/reminders/pay-rent.ics",
     icalendar_data="",
-    alarms=[CalDAVAlarm(trigger_minutes=0), CalDAVAlarm(trigger_minutes=1440)],
+    alarms=[
+        CalDAVAlarm(trigger_minutes=0),
+        CalDAVAlarm(trigger_minutes=1440),
+        CalDAVAlarm(trigger_date=DUE),
+    ],
     recurrence_rules=[CalDAVRecurrence("MONTHLY", 1, None, None, None, None)],
 )
 
@@ -101,7 +105,7 @@ async def test_caldav_title_edit_leaves_apple_alarms_and_recurrence_alone(tmp_pa
     assert fields["alarms"] is None and fields["recurrence_rules"] is None
 
 
-async def test_caldav_alarm_edit_replaces_only_what_caldav_holds(tmp_path):
+async def test_caldav_alarm_edit_is_applied(tmp_path):
     engine, reminders, _ = await synced_pair(
         tmp_path,
         caldav=replace(CALDAV, alarms=[CalDAVAlarm(trigger_minutes=30)], last_modified=EDITED),
@@ -110,8 +114,8 @@ async def test_caldav_alarm_edit_replaces_only_what_caldav_holds(tmp_path):
     await engine.sync_calendar("Reminders", "Reminders")
 
     [(_, fields)] = reminders.updates
-    # Apple's fixed-time alarm isn't on CalDAV yet (#25), so it is kept
-    assert fields["alarms"] == [ReminderAlarm(relative_offset=-1800), FIXED_TIME]
+    # update_reminder keeps the location alarm (see below)
+    assert fields["alarms"] == [ReminderAlarm(relative_offset=-1800)]
     assert fields["recurrence_rules"] is None
 
 
@@ -151,7 +155,7 @@ async def test_apple_alarm_edit_is_sent_to_caldav(tmp_path):
     await engine.sync_calendar("Reminders", "Reminders")
 
     [(_, fields)] = server.updates
-    assert fields["alarms"] == [CalDAVAlarm(trigger_minutes=0)]
+    assert fields["alarms"] == [CalDAVAlarm(trigger_minutes=0), CalDAVAlarm(trigger_date=DUE)]
     assert fields["recurrence_rules"] is None
 
 
@@ -196,6 +200,22 @@ async def test_unchanged_pair_without_fingerprints_gets_them(tmp_path):
 
     assert reminders.updates == [] and server.updates == []
     assert await stored_fingerprints(engine) == engine._sync_fingerprints(APPLE, CALDAV)
+
+
+async def test_fingerprints_change_only_with_their_version(tmp_path):
+    """
+    If this fails, a conversion changed what alarms or recurrence rules sync as.
+
+    Stored fingerprints would then all look like edits, so bump FINGERPRINT_VERSION
+    and update the expected values here.
+    """
+    engine, _, _ = await make_engine(tmp_path, [], [])
+
+    assert engine._sync_fingerprints(APPLE, CALDAV) == {
+        "version": 2,
+        "apple": {"alarms": "38fe450b0b3810f2", "recurrence": "a82d7bec1dd50ba7"},
+        "caldav": {"alarms": "f7a650dccae223fe", "recurrence": "5f92bc01c870d826"},
+    }
 
 
 def location_alarm() -> EKAlarm:
