@@ -152,6 +152,24 @@ class RemindersSyncEngine:
         await self.caldav_adapter.connect()
         logger.info("Reminders sync engine initialized")
 
+    @staticmethod
+    def _match_candidates(groups: dict[str, list]) -> dict:
+        """
+        Pick the reminder to match for each title and due date, leaving out ambiguous ones.
+
+        A lone reminder is used as it is. Among several, completed ones are set aside: a
+        shopping list keeps what was bought, so an open "Milk" often sits among many
+        completed ones. With more than one open, or none, it's unclear which to match.
+        """
+        candidates = {}
+        for key, items in groups.items():
+            open_items = [item for item in items if not item.completed]
+            if len(items) == 1:
+                candidates[key] = items[0]
+            elif len(open_items) == 1:
+                candidates[key] = open_items[0]
+        return candidates
+
     def _make_dedup_key(
         self, title: str | None, due_date: datetime | None, is_all_day: bool
     ) -> str:
@@ -471,6 +489,9 @@ class RemindersSyncEngine:
                 - delete_local: [(local_uuid, ...)]
                 - delete_remote: [(remote_uid, ...)]
                 - unchanged: [(local_uuid, ...)]
+                - matched: [(local_reminder, remote_todo, last_sync)], pairs matched by
+                  title and due date, which need a mapping (they are in one of the
+                  update lists or unchanged as well)
         """
         plan = {
             "create_local": [],
@@ -480,14 +501,19 @@ class RemindersSyncEngine:
             "delete_local": [],
             "delete_remote": [],
             "unchanged": [],
+            "matched": [],
         }
 
         # Track which items we've processed
         processed_local = set()
         processed_remote = set()
 
-        # Detect fresh setup (empty database) for bootstrap reconciliation
-        is_fresh_setup = len(db_mappings) == 0
+        # Match by title and due date while none of this list's reminders are mapped: a
+        # fresh setup, a reset, or a list that is new. Other lists' mappings don't count.
+        is_fresh_list = not any(
+            local_uuid in local_by_uuid or mapping["remote_uid"] in remote_by_uid
+            for local_uuid, mapping in db_mappings.items()
+        )
 
         # Process all database mappings
         for local_uuid, mapping in db_mappings.items():
@@ -550,43 +576,29 @@ class RemindersSyncEngine:
                 # Will be handled by database cleanup
                 pass
 
-        # --- Bootstrap reconciliation for fresh setup ---
-        # When database is empty but same reminders exist on both Apple and CalDAV,
+        # --- Bootstrap reconciliation for a fresh list ---
+        # When the same reminders exist on both Apple and CalDAV but none are mapped,
         # pair them by title + due_date to avoid creating duplicates.
-        if is_fresh_setup:
-            # Build candidate maps for unprocessed items
-            local_candidates: dict[str, EventKitReminder] = {}
-            remote_candidates: dict[str, CalDAVReminder] = {}
-            local_dupe_keys: set[str] = set()
-            remote_dupe_keys: set[str] = set()
-
+        if is_fresh_list:
+            # Group unprocessed items by title + due date
+            local_groups: dict[str, list[EventKitReminder]] = {}
             for local_uuid, local_reminder in local_by_uuid.items():
-                if local_uuid in processed_local:
-                    continue
-                key = self._make_dedup_key(
-                    local_reminder.title, local_reminder.due_date, local_reminder.is_all_day
-                )
-                if key in local_candidates:
-                    local_dupe_keys.add(key)  # Multiple with same key - ambiguous
-                else:
-                    local_candidates[key] = local_reminder
+                if local_uuid not in processed_local:
+                    key = self._make_dedup_key(
+                        local_reminder.title, local_reminder.due_date, local_reminder.is_all_day
+                    )
+                    local_groups.setdefault(key, []).append(local_reminder)
 
+            remote_groups: dict[str, list[CalDAVReminder]] = {}
             for remote_uid, remote_todo in remote_by_uid.items():
-                if remote_uid in processed_remote:
-                    continue
-                key = self._make_dedup_key(
-                    remote_todo.summary, remote_todo.due_date, remote_todo.is_all_day
-                )
-                if key in remote_candidates:
-                    remote_dupe_keys.add(key)  # Multiple with same key - ambiguous
-                else:
-                    remote_candidates[key] = remote_todo
+                if remote_uid not in processed_remote:
+                    key = self._make_dedup_key(
+                        remote_todo.summary, remote_todo.due_date, remote_todo.is_all_day
+                    )
+                    remote_groups.setdefault(key, []).append(remote_todo)
 
-            # Remove ambiguous keys (can't safely match when duplicates exist)
-            for key in local_dupe_keys:
-                local_candidates.pop(key, None)
-            for key in remote_dupe_keys:
-                remote_candidates.pop(key, None)
+            local_candidates = self._match_candidates(local_groups)
+            remote_candidates = self._match_candidates(remote_groups)
 
             # Find matching pairs by title + due_date
             matched_keys = set(local_candidates).intersection(remote_candidates)
@@ -626,6 +638,11 @@ class RemindersSyncEngine:
                         f"Bootstrap match: '{local_reminder.title}' - remote wins "
                         f"(local={local_mod}, remote={remote_mod})"
                     )
+
+                # If an update is needed, sync from the older side's time, so that a
+                # failed update is retried
+                pick = max if timestamps_equal else min
+                plan["matched"].append((local_reminder, remote_todo, pick(local_mod, remote_mod)))
 
                 processed_local.add(local_reminder.uuid)
                 processed_remote.add(remote_todo.uid)
@@ -738,6 +755,26 @@ class RemindersSyncEngine:
 
         if not apple_calendar_id:
             raise ValueError(f"Apple Reminders calendar not found: {apple_calendar_name}")
+
+        # Pairs matched by title and due date have no mapping yet. Record them first, so
+        # the updates below have one to update and later syncs don't take them for new.
+        for local_reminder, remote_todo, last_sync in plan["matched"]:
+            try:
+                await self.db.add_mapping(
+                    local_uuid=local_reminder.uuid,
+                    remote_uid=remote_todo.uid,
+                    local_title=local_reminder.title,
+                    remote_caldav_url=remote_todo.caldav_url,
+                    last_sync=last_sync,
+                    sync_fingerprints=json.dumps(
+                        self._sync_fingerprints(local_reminder, remote_todo)
+                    ),
+                )
+            except Exception as e:
+                msg = f"Failed to record matched reminder '{local_reminder.title}': {e}"
+                logger.error(msg)
+                error_messages.append(msg)
+                stats["errors"] += 1
 
         # Create in Apple Reminders
         for remote_todo in plan["create_local"]:

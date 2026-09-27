@@ -18,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - When you changed a reminder's alarms in Apple Reminders, iCloudBridge replaced every alarm on the task on your CalDAV server. Alarms it doesn't sync, such as location alarms saved by an Apple device, were deleted. The alarms it rewrote lost settings other apps had given them, such as playing a sound. It now only removes the alarms you deleted and adds the ones you added (#28).
 - Location alarms saved on your CalDAV server by an Apple device, and alarms set to do nothing, arrived in Apple Reminders as alarms set decades in the past. They're now left out.
 - Repeats lost everything except how often they repeat and on which weekdays. A reminder repeating on the 1st and 15th, on the last day of the month, on the last weekday, or only in certain months became a plain monthly or yearly repeat on the other side. A repeat on the second Tuesday became every Tuesday. Repeats now sync in full, both ways. A reminder whose repeat was already simplified keeps it, so set its repeat again (#22, #27).
+- After "Reset Reminders", reminders already on both sides were matched up by title and due date, but the matches weren't saved. As soon as anything else synced, all of them were created again on both sides. Matches are now saved. Matching also only covered the lists synced before anything was created. Now every list is matched while none of its reminders have synced (#29).
+- When matching, a reminder with the same title as completed ones, as in a shopping list that keeps what you bought, wasn't matched and was created again on both sides. The open one is now matched.
 
 ## [0.3.1] - 2026-09-26
 
