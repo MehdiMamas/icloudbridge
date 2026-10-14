@@ -4,7 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.3.3] - 2026-10-04
+
+### Fixed
+- Some notes synced to your markdown folder with another note's contents and attachments under their own title. Each note now gets its own. A note that already synced with the wrong contents stays that way in your markdown folder until you next edit it in Apple Notes. Don't edit a wrong copy in your markdown folder, because the sync would copy it back over the real note. Thanks to @williamconnolly for finding and fixing this (#33).
+
+## [0.3.2] - 2026-09-29
+
+### Added
+- The Passwords page can now work out which of your Apple Passwords logins each Ente Auth verification code belongs to. Apple Passwords doesn't let apps add a code to a login, so you get a checklist with the setup key and QR code for each login, to add yourself. A login that already has a code is left alone, and when a code could fit more than one login, nothing is chosen for you. Thanks to @MehdiMamas for adding this (#16, #31).
 
 ### Fixed
 - Repeating reminders that came from your CalDAV server turned into daily repeats in Apple Reminders. They kept their interval, so "every 2 weeks" became "every 2 days". This happened to reminders created on the server, and to any repeating reminder edited there, even if only its title changed. They now keep their daily, weekly, monthly or yearly repeat. A reminder that already changed to a daily repeat stays that way, so set its repeat again in Apple Reminders (#23).
@@ -20,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Repeats lost everything except how often they repeat and on which weekdays. A reminder repeating on the 1st and 15th, on the last day of the month, on the last weekday, or only in certain months became a plain monthly or yearly repeat on the other side. A repeat on the second Tuesday became every Tuesday. Repeats now sync in full, both ways. A reminder whose repeat was already simplified keeps it, so set its repeat again (#22, #27).
 - After "Reset Reminders", reminders already on both sides were matched up by title and due date, but the matches weren't saved. As soon as anything else synced, all of them were created again on both sides. Matches are now saved. Matching also only covered the lists synced before anything was created. Now every list is matched while none of its reminders have synced (#29).
 - When matching, a reminder with the same title as completed ones, as in a shopping list that keeps what you bought, wasn't matched and was created again on both sides. The open one is now matched.
+- When a reminder changed in Apple Reminders, iCloudBridge deleted the task's start date and creation date on your CalDAV server. It also reset a completed task's completion date to the time of the sync. They're now kept. A start date at the due time moves with the due date (#32).
 
 ## [0.3.1] - 2026-09-26
 

@@ -215,6 +215,55 @@ export interface PasswordsSyncResponse {
   download?: PasswordsDownloadInfo;
 }
 
+export interface EnteOtpLoginRef {
+  title: string;
+  username: string;
+}
+
+export interface EnteOtpMatch {
+  issuer: string;
+  account: string;
+  title: string;
+  username: string;
+  setup_key: string;
+  otpauth_uri: string;
+  algorithm: string;
+  digits: number;
+  period: number;
+  // The code uses settings a pasted setup key can't carry, so it needs the QR code.
+  qr_only: boolean;
+  // Ente names an account that isn't this login's username.
+  account_differs: boolean;
+}
+
+export interface EnteOtpAmbiguous {
+  issuer: string;
+  account: string;
+  candidates: EnteOtpLoginRef[];
+}
+
+export interface EnteOtpNamed {
+  issuer: string;
+  account: string;
+  title?: string;
+  username?: string;
+}
+
+export interface EnteOtpSkipped {
+  label: string;
+  reason: string;
+}
+
+export interface EnteOtpPreview {
+  status: string;
+  matched: EnteOtpMatch[];
+  ambiguous: EnteOtpAmbiguous[];
+  unmatched: EnteOtpNamed[];
+  already_set: EnteOtpNamed[];
+  conflict: EnteOtpNamed[];
+  skipped: EnteOtpSkipped[];
+}
+
 export interface PasswordsStatus {
   enabled: boolean;
   provider: 'vaultwarden' | 'nextcloud';

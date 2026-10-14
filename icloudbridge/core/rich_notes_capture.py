@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import os
+import shutil
 import subprocess
-import tempfile
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -128,13 +128,21 @@ class RichNotesCapture:
             logger.info("Using ENV python: %s", env_python)
             return env_python
 
-        app_support = Path.home() / "Library" / "Application Support" / "iCloudBridge" / "venv" / "bin" / "python3"
+        app_support = (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "iCloudBridge"
+            / "venv"
+            / "bin"
+            / "python3"
+        )
         if app_support.is_file():
             logger.info("Using App Support Python: %s", app_support)
             return str(app_support)
 
         logger.error(
-            "No managed python found. Checked ICLOUDBRIDGE_VENV_PYTHON=%s and %s; falling back to %s", 
+            "No managed python found. Checked ICLOUDBRIDGE_VENV_PYTHON=%s and %s; falling back to %s",
             env_python,
             app_support,
             sys.executable,
@@ -154,14 +162,15 @@ class RichNotesCapture:
     def _find_json(output_dir: Path) -> Path:
         candidates = list(output_dir.rglob("json/all_notes_*.json"))
         if not candidates:
-            raise FileNotFoundError(f"Could not find all_notes_*.json under ripper output {output_dir}")
+            raise FileNotFoundError(
+                f"Could not find all_notes_*.json under ripper output {output_dir}"
+            )
         return candidates[0]
 
 
 def build_note_indexes(notes_section: Any) -> dict[str, dict[str, Any]]:
     """Mirror the Ruby ripper's sections into handy lookup tables."""
     by_uuid: dict[str, dict[str, Any]] = {}
-    by_primary: dict[int, dict[str, Any]] = {}
     by_note_id: dict[int, dict[str, Any]] = {}
 
     if isinstance(notes_section, dict):
@@ -172,32 +181,21 @@ def build_note_indexes(notes_section: Any) -> dict[str, dict[str, Any]]:
             if uuid:
                 by_uuid[str(uuid)] = entry
 
-            pk = entry.get("primary_key")
-            if isinstance(pk, int):
-                by_primary[pk] = entry
-
             note_id = entry.get("note_id")
             if isinstance(note_id, int):
                 by_note_id[note_id] = entry
 
     return {
         "by_uuid": by_uuid,
-        "by_primary": by_primary,
         "by_note_id": by_note_id,
     }
 
 
 def lookup_note_entry(local_uuid: str, indexes: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
-    """Resolve a CoreData UUID/primary key/ICNote id into a ripper entry."""
+    """Resolve a UUID or ICNote ID into a ripper entry."""
     entry = indexes.get("by_uuid", {}).get(local_uuid)
     if entry:
         return entry
-
-    pk = _extract_primary_key(local_uuid)
-    if pk is not None:
-        entry = indexes.get("by_primary", {}).get(pk)
-        if entry:
-            return entry
 
     note_id = _extract_note_id(local_uuid)
     if note_id is not None:
@@ -219,16 +217,6 @@ def extract_note_content(note_entry: dict[str, Any]) -> str:
     else:
         body = html
     return body
-
-
-def _extract_primary_key(coredata_id: str) -> int | None:
-    if "/p" not in coredata_id:
-        return None
-    suffix = coredata_id.rsplit("/p", 1)[-1]
-    try:
-        return int(suffix)
-    except ValueError:
-        return None
 
 
 def _extract_note_id(coredata_id: str) -> int | None:

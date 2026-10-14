@@ -9,6 +9,7 @@ import apiClient from '@/lib/api-client';
 import { useSyncStore } from '@/store/sync-store';
 import type { AppConfig, PasswordsDownloadInfo, PasswordsSyncResponse, SyncLog } from '@/types/api';
 import ServiceDisabledNotice from '@/components/ServiceDisabledNotice';
+import EnteOtpSection from '@/components/EnteOtpSection';
 
 type PasswordProvider = 'vaultwarden' | 'nextcloud';
 
@@ -674,6 +675,8 @@ export default function Passwords() {
               </div>
             )}
           </section>
+
+          <EnteOtpSection />
         </>
       )}
     </div>
